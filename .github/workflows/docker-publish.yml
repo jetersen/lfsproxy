@@ -1,53 +1,268 @@
-name: Publish Container
+name: Build and release
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: false
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: jetersen/lfsproxy
+  IMAGE_DESCRIPTION: Pull-through S3 cache for Git LFS
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  prepare-build:
+    runs-on: ubuntu-slim
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Generate version
+      id: version
+      run: |
+        BUMP="${{ github.event.inputs.bump }}"
+
+        LATEST_TAG=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)
+
+        if [ -z "$LATEST_TAG" ]; then
+          VERSION="0.1.0"
+        else
+          CURRENT="${LATEST_TAG#v}"
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+
+          case "$BUMP" in
+            major) VERSION="$((MAJOR + 1)).0.0" ;;
+            minor) VERSION="${MAJOR}.$((MINOR + 1)).0" ;;
+            *)     VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+          esac
+        fi
+
+        echo "Generated version: $VERSION"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+  build-multiarch-images:
+    needs: prepare-build
+
     permissions:
       contents: read
       packages: write
 
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+        - linux/amd64
+        - linux/arm64
+
+    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+
     steps:
-      - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v6
 
-      - uses: docker/setup-buildx-action@v3
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        platforms: ${{ matrix.platform }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
+    - name: Generate Docker metadata and labels
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=raw,value=${{ needs.prepare-build.outputs.version }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+        labels: |
+          org.opencontainers.image.title=lfsproxy
+          org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }} (${{ matrix.platform }})
+          org.opencontainers.image.version=${{ needs.prepare-build.outputs.version }}
+          org.opencontainers.image.licenses=MIT
+          org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          org.opencontainers.image.created={{ date 'YYYY-MM-DDTHH:mm:ss' tz='UTC' }}
+          org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+    - name: Build and push platform-specific image
+      uses: docker/build-push-action@v6
+      env:
+        DOCKER_BUILD_SUMMARY: false
+      with:
+        context: .
+        platforms: ${{ matrix.platform }}
+        push: true
+        provenance: false
+        sbom: false
+        tags: ${{ steps.meta.outputs.tags }}
+        annotations: ${{ steps.meta.outputs.annotations }}
+        labels: ${{ steps.meta.outputs.labels }}
+        outputs: type=image,oci-mediatypes=true
+
+  create-multiarch-manifest:
+    needs:
+    - prepare-build
+    - build-multiarch-images
+
+    permissions:
+      contents: read
+      packages: write
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Generate multiarch manifest metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        annotations: |
+          type=org.opencontainers.image.description,value=${{ env.IMAGE_DESCRIPTION }}
+        tags: |
+          type=raw,value=${{ needs.prepare-build.outputs.version }}
+          type=raw,value=latest
+
+    - name: Create multiarch manifest and push
+      run: |
+        docker buildx imagetools create \
+          $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+          --annotation='index:org.opencontainers.image.title=lfsproxy' \
+          --annotation='index:org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }}' \
+          --annotation='index:org.opencontainers.image.version=${{ needs.prepare-build.outputs.version }}' \
+          --annotation='index:org.opencontainers.image.licenses=MIT' \
+          --annotation='index:org.opencontainers.image.source=https://github.com/${{ github.repository }}' \
+          --annotation='index:org.opencontainers.image.revision=${{ github.sha }}' \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-build.outputs.version }}-amd64 \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-build.outputs.version }}-arm64
+
+    - name: Inspect multiarch manifest
+      run: |
+        docker buildx imagetools inspect '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-build.outputs.version }}'
+
+  publish-github-release:
+    needs:
+    - prepare-build
+    - create-multiarch-manifest
+
+    runs-on: ubuntu-slim
+
+    permissions:
+      contents: write
+      pull-requests: read
+
+    steps:
+    - name: Checkout repository with full history
+      uses: actions/checkout@v6
+
+    - name: Generate release changelog from PRs and commits
+      id: changelog
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        LATEST_TAG=$(git tag -l --sort=-version:refname | head -n 1)
+
+        if [ -z "$LATEST_TAG" ]; then
+          COMMIT_RANGE=""
+        else
+          COMMIT_RANGE="${LATEST_TAG}..HEAD"
+          if [ -z "$(git rev-list $COMMIT_RANGE)" ]; then
+            echo "CHANGELOG=No new changes since last release." >> $GITHUB_OUTPUT
+            echo "COMPARISON_URL=https://github.com/${{ github.repository }}/compare/${LATEST_TAG}...v${{ needs.prepare-build.outputs.version }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+        fi
+
+        if [ -z "$COMMIT_RANGE" ]; then
+          PR_LIST=$(gh pr list --state merged --limit 10 --json number,title,url --jq '.[] | "- **PR [#\(.number)](\(.url))**: \(.title)"')
+        else
+          PR_NUMBERS=$(git log $COMMIT_RANGE --oneline --grep="Merge pull request" | grep -o "#[0-9]\+" | sed 's/#//' | sort -u | head -10)
+          PR_LIST=""
+          for pr_num in $PR_NUMBERS; do
+            pr_info=$(gh pr view $pr_num --json number,title,url --jq '"- **PR [#" + (.number|tostring) + "](" + .url + ")**: " + .title' 2>/dev/null || echo "- **PR [#$pr_num]**: PR details not available")
+            PR_LIST=$(printf '%s%s\n' "$PR_LIST" "$pr_info")
+          done
+        fi
+
+        if [ -z "$COMMIT_RANGE" ]; then
+          COMMITS_LIST=$(git log --oneline --grep="Merge pull request" --invert-grep --max-count=10 | sed 's/^[a-f0-9]\+ /- **Commit**: /')
+        else
+          COMMITS_LIST=$(git log $COMMIT_RANGE --oneline --grep="Merge pull request" --invert-grep --max-count=10 | sed 's/^[a-f0-9]\+ /- **Commit**: /')
+        fi
+
+        CHANGELOG_CONTENT=""
+        [ -n "$PR_LIST" ] && CHANGELOG_CONTENT=$(printf '#### Pull Requests\n%s' "$PR_LIST")
+        if [ -n "$COMMITS_LIST" ]; then
+          CHANGELOG_CONTENT=$(printf '%s\n\n#### Commits\n%s' "$CHANGELOG_CONTENT" "$COMMITS_LIST")
+        fi
+        [ -z "$CHANGELOG_CONTENT" ] && CHANGELOG_CONTENT="No changes found."
+
+        echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+        echo "$CHANGELOG_CONTENT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+        if [ -n "$LATEST_TAG" ]; then
+          echo "COMPARISON_URL=https://github.com/${{ github.repository }}/compare/${LATEST_TAG}...v${{ needs.prepare-build.outputs.version }}" >> $GITHUB_OUTPUT
+        else
+          echo "COMPARISON_URL=https://github.com/${{ github.repository }}/commits/v${{ needs.prepare-build.outputs.version }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create GitHub Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ needs.prepare-build.outputs.version }}
+        IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        CHANGELOG: ${{ steps.changelog.outputs.CHANGELOG }}
+        COMPARISON_URL: ${{ steps.changelog.outputs.COMPARISON_URL }}
+      run: |
+        gh release create "v${VERSION}" \
+          --title "Release ${VERSION}" \
+          --notes "$(cat <<EOF
+        ## ${IMAGE_DESCRIPTION} v${VERSION}
+
+        ### Docker Images
+
+        \`\`\`bash
+        docker pull ${IMAGE}:${VERSION}
+        docker pull ${IMAGE}:latest
+        \`\`\`
+
+        ### Changes
+
+        ${CHANGELOG}
+
+        ---
+
+        **Full Changelog**: ${COMPARISON_URL}
+        EOF
+        )"
