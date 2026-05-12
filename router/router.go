@@ -26,11 +26,12 @@ func NewRouter() Router {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	gin := gin.Default()
-	gin.Use(cors.Default())
+	engine := gin.New()
+	engine.Use(gin.LoggerWithConfig(gin.LoggerConfig{SkipPaths: []string{"/health"}}), gin.Recovery())
+	engine.Use(cors.Default())
 
 	return Router{
-		engine: gin,
+		engine: engine,
 	}
 }
 

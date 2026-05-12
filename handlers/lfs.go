@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/allegro/bigcache/v3"
 	"github.com/gin-gonic/gin"
@@ -48,8 +47,6 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 }
 
 func (l LFSHandler) PostBatch(c *gin.Context) {
-	log.Printf("incoming: %s %s", c.Request.Method, c.Request.URL.Path)
-
 	if !strings.HasSuffix(c.Request.URL.Path, "/objects/batch") {
 		c.AbortWithStatus(404)
 		return
@@ -95,7 +92,6 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 	}
 
 	if len(modifiedBatchRequest.Objects) > 0 {
-		log.Printf("forwarding %d objects to upstream", len(modifiedBatchRequest.Objects))
 		upstreamBatchResponse, statusCode, err := l.getFromUpstream(ctx, modifiedBatchRequest, c.Request.URL.Path, c.Request.Header)
 		if err != nil {
 			c.AbortWithError(statusCode, err) //nolint:errcheck
@@ -153,15 +149,7 @@ func (l LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchReque
 		req.Header.Set("Authorization", auth)
 	}
 
-	log.Printf("upstream request: %s %s (auth: %v)", req.Method, fullURL, headers.Get("Authorization") != "")
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			log.Printf("redirect: %s -> %s", via[len(via)-1].URL, req.URL)
-			return nil
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("unexpected error from upstream %v\n", err.Error())
 		return nil, 500, err
