@@ -46,12 +46,12 @@ export GIT_CONFIG_VALUE_0=http://lfsproxy:9999/${ORG}/${REPO}.git/info/lfs
 
 ### TeamCity
 
-Add these as build parameters:
+Add these as build parameters (using existing `GIT_OWNER` and `GIT_REPO_NAME` parameters):
 
 ```
 env.GIT_CONFIG_COUNT=1
 env.GIT_CONFIG_KEY_0=lfs.url
-env.GIT_CONFIG_VALUE_0=http://lfsproxy:9999/%vcsroot.url%
+env.GIT_CONFIG_VALUE_0=http://lfsproxy:9999/%GIT_OWNER%/%GIT_REPO_NAME%.git/info/lfs
 ```
 
 ### Jenkins
