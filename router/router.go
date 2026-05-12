@@ -27,7 +27,7 @@ func NewRouter() Router {
 	}
 
 	engine := gin.New()
-	engine.Use(gin.LoggerWithConfig(gin.LoggerConfig{SkipPaths: []string{"/health"}}), gin.Recovery())
+	engine.Use(gin.LoggerWithConfig(gin.LoggerConfig{SkipPaths: []string{"/health", "/favicon.ico"}}), gin.Recovery())
 	engine.Use(cors.Default())
 
 	return Router{
