@@ -8,7 +8,8 @@ import (
 
 type Config struct {
 	DebugMode                bool          `split_words:"true" default:"false"`
-	UpstreamBaseURL          string        `split_words:"true" required:"true"`
+	UpstreamHost             string        `split_words:"true" required:"true"`
+	AllowedOrgs              []string      `split_words:"true"`
 	CacheEviction            time.Duration `split_words:"true" default:"23h"`
 	S3Bucket                 string        `split_words:"true" required:"true"`
 	S3UseAccelerate          bool          `split_words:"true" default:"false"`

@@ -44,7 +44,7 @@ func (r Router) InitRoutes(ctx context.Context, cfg *config.Config) error {
 
 	r.engine.Use(gzip.Gzip(gzip.DefaultCompression))
 	r.engine.GET("/health", healthHandler.Get)
-	r.engine.POST("/objects/batch", lfsHandler.PostBatch)
+	r.engine.POST("/*path", lfsHandler.PostBatch)
 
 	if cfg.EnablePrometheusExporter {
 		r.engine.GET("/metrics", exporter.PrometheusHandler())

@@ -107,8 +107,8 @@ func (m *MockAWSService) Reset() {
 
 func TestLFSHandler(t *testing.T) {
 	cfg := &config.Config{
-		UpstreamBaseURL: "https://fake-git-server.com/repository.git/",
-		CacheEviction:   1 * time.Minute,
+		UpstreamHost:  "https://fake-git-server.com",
+		CacheEviction: 1 * time.Minute,
 	}
 
 	cache := NewMockCache()
@@ -128,7 +128,7 @@ func TestLFSHandler(t *testing.T) {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
 
-		httpmock.RegisterResponder("POST", "https://fake-git-server.com/repository.git/objects/batch",
+		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
 				resp, err := httpmock.NewJsonResponse(200, map[string]interface{}{
 					"transfer": "basic",
@@ -171,7 +171,7 @@ func TestLFSHandler(t *testing.T) {
 			HashAlgo: "sha256",
 		}
 
-		batchResponse, statusCode, err := lfsHandler.getFromUpstream(context.TODO(), batchRequest, "/objects/batch", http.Header{})
+		batchResponse, statusCode, err := lfsHandler.getFromUpstream(context.TODO(), batchRequest, "/org/repo.git/info/lfs/objects/batch", http.Header{})
 		assert.NoError(t, err)
 		assert.Equal(t, 200, statusCode)
 		assert.Equal(t, "basic", batchResponse.Transfer)
@@ -184,7 +184,7 @@ func TestLFSHandler(t *testing.T) {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
 
-		httpmock.RegisterResponder("POST", "https://fake-git-server.com/repository.git/objects/batch",
+		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
 				assert.FailNow(t, "should not call upstream")
 				return nil, nil
@@ -216,7 +216,7 @@ func TestLFSHandler(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
 
-		r.POST("/objects/batch", lfsHandler.PostBatch)
+		r.POST("/*path", lfsHandler.PostBatch)
 
 		var jsonData = []byte(`{
 			"operation": "download",
@@ -233,7 +233,7 @@ func TestLFSHandler(t *testing.T) {
 
 		var err error
 
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		c.Request.Header.Set("Content-Type", "application/vnd.git-lfs+json")
@@ -258,7 +258,7 @@ func TestLFSHandler(t *testing.T) {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
 
-		httpmock.RegisterResponder("POST", "https://fake-git-server.com/repository.git/objects/batch",
+		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
 				resp, err := httpmock.NewJsonResponse(200, map[string]interface{}{
 					"transfer": "basic",
@@ -311,7 +311,7 @@ func TestLFSHandler(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
 
-		r.POST("/objects/batch", lfsHandler.PostBatch)
+		r.POST("/*path", lfsHandler.PostBatch)
 
 		var jsonData = []byte(`{
 			"operation": "download",
@@ -332,7 +332,7 @@ func TestLFSHandler(t *testing.T) {
 
 		var err error
 
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		c.Request.Header.Set("Content-Type", "application/vnd.git-lfs+json")
@@ -369,7 +369,7 @@ func TestLFSHandler(t *testing.T) {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
 
-		httpmock.RegisterResponder("POST", "https://fake-git-server.com/repository.git/objects/batch",
+		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
 				resp, err := httpmock.NewJsonResponse(200, map[string]interface{}{
 					"transfer": "basic",
@@ -420,7 +420,7 @@ func TestLFSHandler(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
 
-		r.POST("/objects/batch", lfsHandler.PostBatch)
+		r.POST("/*path", lfsHandler.PostBatch)
 
 		var jsonData = []byte(`{
 			"operation": "download",
@@ -441,7 +441,7 @@ func TestLFSHandler(t *testing.T) {
 
 		var err error
 
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		c.Request.Header.Set("Content-Type", "application/vnd.git-lfs+json")
@@ -459,5 +459,101 @@ func TestLFSHandler(t *testing.T) {
 		assert.Equal(t, expected, string(b))
 
 		assert.False(t, mockAWSService.uploadCalled.Load())
+	})
+
+	t.Run("it should reject requests for disallowed orgs", func(t *testing.T) {
+		restrictedHandler := LFSHandler{
+			cache:         cache,
+			promCollector: lfsHandler.promCollector,
+			config: &config.Config{
+				UpstreamHost:  "https://fake-git-server.com",
+				CacheEviction: 1 * time.Minute,
+				AllowedOrgs:   []string{"allowed-org"},
+			},
+			awsService: mockAWSService,
+		}
+
+		w := httptest.NewRecorder()
+		c, r := gin.CreateTestContext(w)
+
+		r.POST("/*path", restrictedHandler.PostBatch)
+
+		var jsonData = []byte(`{
+			"operation": "download",
+			"transfers": [ "basic" ],
+			"ref": { "name": "refs/heads/main" },
+			"objects": [{"oid": "123", "size": 123}],
+			"hash_algo": "sha256"
+		}`)
+
+		var err error
+		c.Request, err = http.NewRequest("POST", "http://localhost:9999/blocked-org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		assert.NoError(t, err)
+
+		r.ServeHTTP(w, c.Request)
+		assert.Equal(t, 403, w.Code)
+	})
+
+	t.Run("it should allow requests for permitted orgs", func(t *testing.T) {
+		defer cache.Reset()
+		defer mockAWSService.Reset()
+
+		restrictedHandler := LFSHandler{
+			cache:         cache,
+			promCollector: lfsHandler.promCollector,
+			config: &config.Config{
+				UpstreamHost:  "https://fake-git-server.com",
+				CacheEviction: 1 * time.Minute,
+				AllowedOrgs:   []string{"allowed-org"},
+			},
+			awsService: mockAWSService,
+		}
+
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("POST", "https://fake-git-server.com/allowed-org/repo.git/info/lfs/objects/batch",
+			func(req *http.Request) (*http.Response, error) {
+				resp, err := httpmock.NewJsonResponse(200, map[string]interface{}{
+					"transfer": "basic",
+					"objects": []map[string]interface{}{
+						{
+							"oid":           "123",
+							"size":          123,
+							"authenticated": true,
+							"actions": map[string]interface{}{
+								"download": map[string]interface{}{
+									"href":       "https://some-download.com",
+									"expires_at": "2016-11-10T15:29:07Z",
+								},
+							},
+						},
+					},
+				})
+				return resp, err
+			},
+		)
+
+		httpmock.RegisterResponder("GET", "https://some-download.com", httpmock.NewStringResponder(200, ""))
+
+		w := httptest.NewRecorder()
+		c, r := gin.CreateTestContext(w)
+
+		r.POST("/*path", restrictedHandler.PostBatch)
+
+		var jsonData = []byte(`{
+			"operation": "download",
+			"transfers": [ "basic" ],
+			"ref": { "name": "refs/heads/main" },
+			"objects": [{"oid": "123", "size": 123}],
+			"hash_algo": "sha256"
+		}`)
+
+		var err error
+		c.Request, err = http.NewRequest("POST", "http://localhost:9999/allowed-org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		assert.NoError(t, err)
+
+		r.ServeHTTP(w, c.Request)
+		assert.Equal(t, 200, w.Code)
 	})
 }

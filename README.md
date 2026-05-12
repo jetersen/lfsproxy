@@ -1,30 +1,78 @@
 # LFS Proxy
 
-This service is a pull-through S3 cache for [Git LFS](https://git-lfs.com/) that caches Upstream LFS objects on S3 to reduce bandwidth costs on Hosted LFS, such as GitHub LFS.
+A pull-through S3 cache for [Git LFS](https://git-lfs.com/) that caches upstream LFS objects on S3 to reduce bandwidth costs on hosted LFS services such as GitHub LFS.
 
-These cached objects are served directly from S3 using Presigned requests for maximum performance.
+Supports multiple repositories — the org and repo are inferred from the request path. Objects are stored by OID (content hash), so identical files across repos are deduplicated automatically.
 
-Requests are cached in-memory using [bigcache](https://github.com/allegro/bigcache) to reduce the amount of HTTP calls to S3
+Cached objects are served directly from S3 using presigned URLs for maximum performance.
 
-## Installing the LFS Proxy
+Requests are cached in-memory using [bigcache](https://github.com/allegro/bigcache) to reduce HTTP calls to S3.
 
-We are providing a [Helm Chart](https://github.com/vela-games/lfsproxy/tree/main/install/helm/lfsproxy) and an example [terrafom module](https://github.com/vela-games/lfsproxy/tree/main/install/terraform/lfsproxy) for deploying the service 
+## Configuration
 
-You'll need to make sure the service account deployed by the chart uses an IAM Role with access to S3 if you are running it on Kubernetes.
+All configuration is loaded from environment variables using [envconfig](https://github.com/kelseyhightower/envconfig).
 
-We currently don't have any public repositories for the Docker Image or the Helm chart, but is something we are looking into.
+| Environment Variable             | Default | Description                                                        |
+|----------------------------------|---------|--------------------------------------------------------------------|
+| `APP_UPSTREAM_HOST`              |         | Upstream Git host (e.g. `https://github.com`)                      |
+| `APP_ALLOWED_ORGS`              |         | Comma-separated list of allowed orgs (empty = allow all)           |
+| `APP_S3_BUCKET`                  |         | S3 bucket name                                                     |
+| `APP_S3_USE_ACCELERATE`          | `false` | Use S3 Transfer Acceleration                                       |
+| `APP_S3_PRESIGN_ENABLED`         | `true`  | Use S3 presigned URLs                                              |
+| `APP_S3_PRESIGN_EXPIRATION`      | `24h`   | Presigned URL expiration                                            |
+| `APP_CACHE_EVICTION`             | `23h`   | In-memory cache eviction interval                                  |
+| `APP_ENABLE_PROMETHEUS_EXPORTER` | `false` | Enable Prometheus metrics endpoint (`/metrics`)                    |
+| `APP_DEBUG_MODE`                 | `false` | Enable gin debug mode                                              |
 
-## Configurations
+### Example
 
-All configurations are loaded from environment variables using [envconfig](https://github.com/kelseyhightower/envconfig).
+```bash
+APP_UPSTREAM_HOST=https://github.com
+APP_ALLOWED_ORGS=jetersen
+APP_S3_BUCKET=my-lfs-cache
+```
 
-| Configuration Name             | Environment Variable                 | Default Value                                    | Description                                                                                       |
-|--------------------------------|--------------------------------------|--------------------------------------------------|---------------------------------------------------------------------------------------------------|
-| DebugMode                      | APP_DEBUG_MODE                       | false                                            | Enable gin-gonic debug mode                                                                       |
-| UpstreamBaseURL                | APP_UPSTREAM_BASE_URL                |                                                  | The LFS Git Repository base url (Example: https://github.com/vela-games/example.git/info/lfs/)    |
-| S3Bucket                       | APP_S3_BUCKET                        |                                                  | S3 Bucket Name                                                                                    |
-| S3UseAccelerate                | APP_S3_USE_ACCELERATE                | false                                            | If S3 Accelerate URLs should be returned                                                          |
-| S3PresignEnabled               | APP_S3_PRESIGN_ENABLED               | true                                             | If S3 Presign URLs should be used                                                                 |
-| S3PresignExpiration            | APP_S3_PRESIGN_EXPIRATION            | 24h                                              | Presign Expiration                                                                                |
-| CacheEviction                  | APP_CACHE_EVICTION                   | 23h                                              | When to evict cached requests from memory                                                         |
-| EnablePrometheusExporter       | APP_ENABLE_PROMETHEUS_EXPORTER       | false                                            | Enable Prometheus exporter endpoint (/metrics)                                                    |
+This configuration caches LFS objects for all repositories under the `jetersen` GitHub org.
+
+## CI Setup
+
+Use Git's environment-based config to route LFS requests through the proxy without any per-repo configuration:
+
+```bash
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=lfs.url
+export GIT_CONFIG_VALUE_0=http://lfsproxy:9999/${ORG}/${REPO}.git/info/lfs
+```
+
+### TeamCity
+
+Add these as build parameters:
+
+```
+env.GIT_CONFIG_COUNT=1
+env.GIT_CONFIG_KEY_0=lfs.url
+env.GIT_CONFIG_VALUE_0=http://lfsproxy:9999/%vcsroot.url%
+```
+
+### Jenkins
+
+```groovy
+environment {
+    GIT_CONFIG_COUNT = '1'
+    GIT_CONFIG_KEY_0 = 'lfs.url'
+    GIT_CONFIG_VALUE_0 = "http://lfsproxy:9999/${env.GIT_URL.replaceAll('.*github.com[:/]', '').replaceAll('\\.git$', '')}.git/info/lfs"
+}
+```
+
+### Per-repo (optional)
+
+If you prefer per-repo config, add a `.lfsconfig` to the repository root:
+
+```ini
+[lfs]
+    url = http://lfsproxy:9999/jetersen/lfs-test.git/info/lfs
+```
+
+## Installing
+
+A [Helm chart](install/helm/lfsproxy) is provided for Kubernetes deployment. The service account must have an IAM role with S3 access (EKS Pod Identity or IRSA).

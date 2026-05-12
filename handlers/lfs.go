@@ -46,7 +46,35 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 	}, nil
 }
 
+func orgFromPath(path string) string {
+	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
+}
+
 func (l LFSHandler) PostBatch(c *gin.Context) {
+	if !strings.HasSuffix(c.Request.URL.Path, "/objects/batch") {
+		c.AbortWithStatus(404)
+		return
+	}
+
+	if len(l.config.AllowedOrgs) > 0 {
+		org := orgFromPath(c.Request.URL.Path)
+		allowed := false
+		for _, a := range l.config.AllowedOrgs {
+			if strings.EqualFold(a, org) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			c.AbortWithStatus(403)
+			return
+		}
+	}
+
 	var batchRequest BatchRequest
 	if err := c.ShouldBindJSON(&batchRequest); err != nil {
 		c.AbortWithError(500, err) //nolint:errcheck
@@ -125,7 +153,7 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 }
 
 func (l LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchRequest, urlPath string, headers http.Header) (*BatchResponse, int, error) {
-	upstreamURL, err := url.Parse(l.config.UpstreamBaseURL)
+	upstreamURL, err := url.Parse(l.config.UpstreamHost)
 	if err != nil {
 		return nil, 500, err
 	}
@@ -136,7 +164,8 @@ func (l LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchReque
 		return nil, 500, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", upstreamURL.Path+strings.TrimLeft(urlPath, "/"), &buf)
+	fullPath := strings.TrimRight(upstreamURL.Path, "/") + urlPath
+	req, err := http.NewRequestWithContext(ctx, "POST", fullPath, &buf)
 	if err != nil {
 		log.Printf("unexpected error creating request %v\n", err.Error())
 		return nil, 500, err
