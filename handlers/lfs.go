@@ -14,10 +14,10 @@ import (
 
 	"github.com/allegro/bigcache/v3"
 	"github.com/gin-gonic/gin"
-	"github.com/vela-games/lfsproxy/cache"
-	"github.com/vela-games/lfsproxy/config"
-	"github.com/vela-games/lfsproxy/exporter"
-	"github.com/vela-games/lfsproxy/services"
+	"github.com/jetersen/lfsproxy/cache"
+	"github.com/jetersen/lfsproxy/config"
+	"github.com/jetersen/lfsproxy/exporter"
+	"github.com/jetersen/lfsproxy/services"
 )
 
 type LFSHandler struct {
@@ -33,7 +33,7 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 		return nil, err
 	}
 
-	awsService, err := services.NewAWSService(cfg.S3Bucket, cfg.S3UseAccelerate, cfg.S3PresignEnabled, cfg.S3PresignExpiration)
+	awsService, err := services.NewAWSService(ctx, cfg.S3Bucket, cfg.S3UseAccelerate, cfg.S3PresignEnabled, cfg.S3PresignExpiration)
 	if err != nil {
 		return nil, err
 	}
@@ -47,15 +47,12 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 }
 
 func (l LFSHandler) PostBatch(c *gin.Context) {
-	// Parse LFS Batch Request to Struct
 	var batchRequest BatchRequest
 	if err := c.ShouldBindJSON(&batchRequest); err != nil {
 		c.AbortWithError(500, err) //nolint:errcheck
 		return
 	}
 
-	// Create Modified Batch Request that will only contain objects to be requested to upstream
-	// These would be the ones not cached in memory
 	modifiedBatchRequest := BatchRequest{
 		Operation: batchRequest.Operation,
 		Transfers: batchRequest.Transfers,
@@ -64,13 +61,12 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 		Objects:   []*BatchObjectResponse{},
 	}
 
-	// Contains a mix of cached and uncached objects
 	finalBatchResponse := BatchResponse{
 		Objects: []*BatchObjectResponse{},
 	}
 
-	// Check if any of the objects being requested is cached in-memory
-	// If they are then don't include them on the modified batch request and add them to the final batch response
+	ctx := c.Request.Context()
+
 	for _, object := range batchRequest.Objects {
 		data, err := l.cache.Get(object.OID)
 		if err == nil {
@@ -90,9 +86,8 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 		modifiedBatchRequest.Objects = append(modifiedBatchRequest.Objects, object)
 	}
 
-	// If we have objects to request to github because they were not cached
 	if len(modifiedBatchRequest.Objects) > 0 {
-		upstreamBatchResponse, statusCode, err := l.getFromUpstream(c, modifiedBatchRequest, c.Request.URL.Path, c.Request.Header)
+		upstreamBatchResponse, statusCode, err := l.getFromUpstream(ctx, modifiedBatchRequest, c.Request.URL.Path, c.Request.Header)
 		if err != nil {
 			c.AbortWithError(statusCode, err) //nolint:errcheck
 			return
@@ -104,8 +99,6 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 
 		totalUrls := len(upstreamBatchResponse.Objects)
 
-		// For each of the objects returned by upstream
-		// check if we have them on S3, if not return the upstream url
 		for _, obj := range upstreamBatchResponse.Objects {
 			_, ok := obj.Actions["download"]
 			if !ok {
@@ -113,14 +106,11 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 				continue
 			}
 
-			obj := obj
-
-			go l.pullS3(*obj, urls)
+			go l.pullS3(ctx, *obj, urls)
 		}
 
 		count := 0
 		for r := range urls {
-			r := r
 			finalBatchResponse.Objects = append(finalBatchResponse.Objects, &r)
 			count++
 
@@ -146,7 +136,6 @@ func (l LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchReque
 		return nil, 500, err
 	}
 
-	// Create new reverse proxy request
 	req, err := http.NewRequestWithContext(ctx, "POST", upstreamURL.Path+strings.TrimLeft(urlPath, "/"), &buf)
 	if err != nil {
 		log.Printf("unexpected error creating request %v\n", err.Error())
@@ -177,7 +166,6 @@ func (l LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchReque
 		return nil, resp.StatusCode, errors.New(string(respBytes))
 	}
 
-	// Parse Response to BatchResponse struct
 	var upstreamBatchResponse BatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&upstreamBatchResponse); err != nil {
 		return nil, 500, err
@@ -186,7 +174,7 @@ func (l LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchReque
 	return &upstreamBatchResponse, resp.StatusCode, nil
 }
 
-func (l LFSHandler) pullS3(obj BatchObjectResponse, urls chan<- BatchObjectResponse) {
+func (l LFSHandler) pullS3(ctx context.Context, obj BatchObjectResponse, urls chan<- BatchObjectResponse) {
 	batchResp := BatchObjectResponse{
 		OID:           obj.OID,
 		Size:          obj.Size,
@@ -195,7 +183,7 @@ func (l LFSHandler) pullS3(obj BatchObjectResponse, urls chan<- BatchObjectRespo
 	}
 	objectAction := obj.Actions["download"]
 
-	exists, err := l.awsService.OIDExists(obj.OID)
+	exists, err := l.awsService.OIDExists(ctx, obj.OID)
 	if err != nil {
 		log.Printf("error: %v\n", err.Error())
 		urls <- batchResp
@@ -203,7 +191,7 @@ func (l LFSHandler) pullS3(obj BatchObjectResponse, urls chan<- BatchObjectRespo
 	}
 
 	if exists {
-		url, headUrl, err := l.awsService.GetOIDPreSignedURL(obj.OID)
+		url, headUrl, err := l.awsService.GetOIDPreSignedURL(ctx, obj.OID)
 		if err != nil {
 			log.Printf("error presigned: %v\n", err.Error())
 			urls <- batchResp
@@ -220,7 +208,7 @@ func (l LFSHandler) pullS3(obj BatchObjectResponse, urls chan<- BatchObjectRespo
 
 		l.promCollector.S3Hits.Add(1)
 	} else {
-		resp, err := http.Get(batchResp.Actions["download"].Href)
+		resp, err := http.Get(batchResp.Actions["download"].Href) //nolint:gosec
 		if err == nil && resp.StatusCode == 200 {
 			go l.pushToS3(obj, resp.Body)
 		}
@@ -230,13 +218,15 @@ func (l LFSHandler) pullS3(obj BatchObjectResponse, urls chan<- BatchObjectRespo
 }
 
 func (l LFSHandler) pushToS3(obj BatchObjectResponse, body io.ReadCloser) {
-	err := l.awsService.UploadOID(obj.OID, body)
+	ctx := context.Background()
+
+	err := l.awsService.UploadOID(ctx, obj.OID, body)
 	if err != nil {
 		log.Printf("error uploading to S3: %v\n", err.Error())
 		return
 	}
 
-	url, headUrl, err := l.awsService.GetOIDPreSignedURL(obj.OID)
+	url, headUrl, err := l.awsService.GetOIDPreSignedURL(ctx, obj.OID)
 	if err != nil {
 		log.Printf("error getting presigned: %v\n", err.Error())
 		return
@@ -263,7 +253,11 @@ func (l LFSHandler) pushToS3(obj BatchObjectResponse, body io.ReadCloser) {
 }
 
 func (l LFSHandler) checkCachedLink(oid string, headHref string) {
-	r, _ := http.DefaultClient.Head(headHref)
+	r, err := http.DefaultClient.Head(headHref) //nolint:gosec
+	if err != nil {
+		log.Printf("error checking cached link for %v: %v\n", oid, err.Error())
+		return
+	}
 	if r.StatusCode != 200 {
 		log.Printf("removing %v from cache due to expired presigned link: %v\n", headHref, r.StatusCode)
 		l.cache.Delete(oid) //nolint:errcheck

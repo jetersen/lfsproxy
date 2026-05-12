@@ -9,71 +9,100 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
 	"github.com/gin-gonic/gin"
 	"github.com/jarcoal/httpmock"
+	"github.com/jetersen/lfsproxy/config"
+	"github.com/jetersen/lfsproxy/exporter"
 	"github.com/stretchr/testify/assert"
-	"github.com/vela-games/lfsproxy/config"
-	"github.com/vela-games/lfsproxy/exporter"
 )
 
 type MockCache struct {
-	Cache   map[string][]byte
-	KeysHit *[]string
+	mu      sync.Mutex
+	cache   map[string][]byte
+	keysHit []string
 }
 
-func (m MockCache) Get(key string) ([]byte, error) {
-	data, ok := m.Cache[key]
+func NewMockCache() *MockCache {
+	return &MockCache{cache: make(map[string][]byte)}
+}
+
+func (m *MockCache) Get(key string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, ok := m.cache[key]
 	if !ok {
 		return nil, errors.New("Entry not found")
 	}
-
-	*m.KeysHit = append(*m.KeysHit, key)
-
+	m.keysHit = append(m.keysHit, key)
 	return data, nil
 }
 
-func (m MockCache) Set(key string, entry []byte) error {
-	m.Cache[key] = entry
+func (m *MockCache) Set(key string, entry []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cache[key] = entry
 	return nil
 }
 
-func (m MockCache) Delete(key string) error {
-	delete(m.Cache, key)
+func (m *MockCache) Delete(key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.cache, key)
 	return nil
 }
 
-func (m MockCache) Reset() {
-	m.Cache = make(map[string][]byte)
-	m.KeysHit = &[]string{}
+func (m *MockCache) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clear(m.cache)
+	m.keysHit = nil
+}
+
+func (m *MockCache) KeysHitLen() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.keysHit)
 }
 
 type MockAWSService struct {
+	mu           sync.Mutex
 	urls         map[string]string
-	uploadCalled *bool
+	uploadCalled atomic.Bool
 }
 
-func (m MockAWSService) OIDExists(oid string) (bool, error) {
+func NewMockAWSService() *MockAWSService {
+	return &MockAWSService{urls: make(map[string]string)}
+}
+
+func (m *MockAWSService) OIDExists(_ context.Context, oid string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	_, ok := m.urls[oid]
 	return ok, nil
 }
 
-func (m MockAWSService) GetOIDPreSignedURL(oid string) (string, string, error) {
+func (m *MockAWSService) GetOIDPreSignedURL(_ context.Context, oid string) (string, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	url := m.urls[oid]
 	return url, url, nil
 }
 
-func (m MockAWSService) UploadOID(oid string, body io.ReadCloser) error {
-	*m.uploadCalled = true
+func (m *MockAWSService) UploadOID(_ context.Context, _ string, _ io.ReadCloser) error {
+	m.uploadCalled.Store(true)
 	return nil
 }
 
-func (m MockAWSService) Reset() {
-	*m.uploadCalled = false
-	m.urls = make(map[string]string)
+func (m *MockAWSService) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.uploadCalled.Store(false)
+	clear(m.urls)
 }
 
 func TestLFSHandler(t *testing.T) {
@@ -82,15 +111,8 @@ func TestLFSHandler(t *testing.T) {
 		CacheEviction:   1 * time.Minute,
 	}
 
-	cache := MockCache{
-		Cache:   make(map[string][]byte),
-		KeysHit: &[]string{},
-	}
-
-	mockAWSService := MockAWSService{
-		urls:         make(map[string]string),
-		uploadCalled: aws.Bool(false),
-	}
+	cache := NewMockCache()
+	mockAWSService := NewMockAWSService()
 
 	lfsHandler := LFSHandler{
 		cache:         cache,
@@ -222,7 +244,7 @@ func TestLFSHandler(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, 1, len(*cache.KeysHit))
+		assert.Equal(t, 1, cache.KeysHitLen())
 
 		expected := fmt.Sprintf(`{"objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}}]}`, now.Format(time.RFC3339Nano))
 
@@ -321,22 +343,28 @@ func TestLFSHandler(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, 1, len(*cache.KeysHit))
+		assert.Equal(t, 1, cache.KeysHitLen())
 
 		expected := fmt.Sprintf(`{"transfer":"basic","objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}},{"oid":"1234","size":123,"authenticated":true,"actions":{"download":{"href":"https://some-download.com","header":{"Key":"value"},"expires_at":"2016-11-10T15:29:07Z"}}}]}`, now.Format(time.RFC3339Nano))
 
 		assert.Equal(t, expected, string(b))
 
 		assert.Eventually(t, func() bool {
-			return *mockAWSService.uploadCalled
+			return mockAWSService.uploadCalled.Load()
 		}, 1*time.Second, 100*time.Millisecond)
 	})
 
 	t.Run("it should return a mix of cached and upstream responses - with URLs from S3", func(t *testing.T) {
+		// Drain background goroutines from previous test before resetting shared state
+		time.Sleep(100 * time.Millisecond)
+		cache.Reset()
+		mockAWSService.Reset()
 		defer cache.Reset()
 		defer mockAWSService.Reset()
 
+		mockAWSService.mu.Lock()
 		mockAWSService.urls["1234"] = "https://this-is-from-s3.com"
+		mockAWSService.mu.Unlock()
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
@@ -424,12 +452,12 @@ func TestLFSHandler(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, 1, len(*cache.KeysHit))
+		assert.Equal(t, 1, cache.KeysHitLen())
 
 		expected := fmt.Sprintf(`{"transfer":"basic","objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}},{"oid":"1234","size":123,"authenticated":true,"actions":{"download":{"href":"https://this-is-from-s3.com","head_href":"https://this-is-from-s3.com","header":{"Key":"value"},"expires_at":"2016-11-10T15:29:07Z"}}}]}`, now.Format(time.RFC3339Nano))
 
 		assert.Equal(t, expected, string(b))
 
-		assert.Equal(t, false, mockAWSService.uploadCalled)
+		assert.False(t, mockAWSService.uploadCalled.Load())
 	})
 }

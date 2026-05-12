@@ -10,9 +10,9 @@ import (
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
-	"github.com/vela-games/lfsproxy/config"
-	"github.com/vela-games/lfsproxy/exporter"
-	"github.com/vela-games/lfsproxy/handlers"
+	"github.com/jetersen/lfsproxy/config"
+	"github.com/jetersen/lfsproxy/exporter"
+	"github.com/jetersen/lfsproxy/handlers"
 )
 
 type Router struct {

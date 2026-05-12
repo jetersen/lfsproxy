@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/vela-games/lfsproxy/config"
-	"github.com/vela-games/lfsproxy/router"
+	"github.com/jetersen/lfsproxy/config"
+	"github.com/jetersen/lfsproxy/router"
 
 	"context"
 	"os"

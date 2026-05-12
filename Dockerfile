@@ -1,4 +1,4 @@
-FROM golang:1.20 AS build
+FROM golang:1.24-alpine AS build
 
 WORKDIR /app
 
@@ -7,15 +7,10 @@ RUN go mod download
 
 COPY . ./
 
-ENV CGO_ENABLED=0
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o lfsproxy ./cmd/server.go
 
-RUN go build -v -o lfsproxy ./cmd/server.go
+FROM alpine:3.21
 
-FROM alpine:3.17
-
-WORKDIR /app
-
-RUN apk add --no-cache libc6-compat gcompat
-
-COPY --from=build /app/lfsproxy /app/lfsproxy
-CMD ["/app/lfsproxy"]
+COPY --from=build /app/lfsproxy /lfsproxy
+USER nobody:nobody
+ENTRYPOINT ["/lfsproxy"]
