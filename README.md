@@ -36,7 +36,11 @@ This configuration caches LFS objects for all repositories under the `jetersen` 
 
 ## CI Setup
 
-Use Git's environment-based config to route LFS requests through the proxy without any per-repo configuration:
+Route LFS requests through the proxy using Git's environment-based config (`GIT_CONFIG_COUNT`, available since Git 2.31). This requires no per-repo configuration.
+
+### Single VCS root
+
+For builds with one repo, set env vars directly:
 
 ```bash
 export GIT_CONFIG_COUNT=1
@@ -44,15 +48,27 @@ export GIT_CONFIG_KEY_0=lfs.url
 export GIT_CONFIG_VALUE_0=http://lfsproxy:9999/${ORG}/${REPO}.git/info/lfs
 ```
 
-### TeamCity
+### Multiple VCS roots
 
-Add these as build parameters (using existing `GIT_OWNER` and `GIT_REPO_NAME` parameters):
+When a build checks out multiple repos that use LFS, `GIT_CONFIG_*` env vars can't differentiate between them (they set a single global `lfs.url`).
 
-```
-env.GIT_CONFIG_COUNT=1
-env.GIT_CONFIG_KEY_0=lfs.url
-env.GIT_CONFIG_VALUE_0=http://lfsproxy:9999/%GIT_OWNER%/%GIT_REPO_NAME%.git/info/lfs
-```
+The solution: disable automatic LFS checkout and pull manually with per-repo config.
+
+**TeamCity example** with two VCS roots (`my-app` and `my-assets`):
+
+1. Disable LFS during checkout — add agent parameter:
+   ```
+   teamcity.git.lfs.enabled=false
+   ```
+
+2. Add a build step (before any steps that need LFS content) to pull LFS for each repo:
+   ```bash
+   git -C "%system.teamcity.build.checkoutDir%" config lfs.url http://lfsproxy:9999/%GIT_OWNER%/%GIT_REPO_NAME%.git/info/lfs
+   git -C "%system.teamcity.build.checkoutDir%" lfs pull
+
+   git -C "%system.teamcity.build.checkoutDir%/path/to/assets" config lfs.url http://lfsproxy:9999/%GIT_OWNER%/%GIT_ASSETS_REPO%.git/info/lfs
+   git -C "%system.teamcity.build.checkoutDir%/path/to/assets" lfs pull
+   ```
 
 ### Jenkins
 
@@ -62,15 +78,6 @@ environment {
     GIT_CONFIG_KEY_0 = 'lfs.url'
     GIT_CONFIG_VALUE_0 = "http://lfsproxy:9999/${env.GIT_URL.replaceAll('.*github.com[:/]', '').replaceAll('\\.git$', '')}.git/info/lfs"
 }
-```
-
-### Per-repo (optional)
-
-If you prefer per-repo config, add a `.lfsconfig` to the repository root:
-
-```ini
-[lfs]
-    url = http://lfsproxy:9999/jetersen/lfs-test.git/info/lfs
 ```
 
 ## Installing
