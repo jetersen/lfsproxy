@@ -24,6 +24,12 @@ type BatchObjectResponse struct {
 	Size          int64                                 `json:"size"`
 	Authenticated bool                                  `json:"authenticated,omitempty"`
 	Actions       map[string]*BatchObjectActionResponse `json:"actions,omitempty"`
+	Error         *BatchObjectErrorResponse             `json:"error,omitempty"`
+}
+
+type BatchObjectErrorResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
 // BatchObjectActionResponse is the action item of a BatchObjectResponse

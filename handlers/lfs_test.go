@@ -556,4 +556,144 @@ func TestLFSHandler(t *testing.T) {
 		r.ServeHTTP(w, c.Request)
 		assert.Equal(t, 200, w.Code)
 	})
+
+	t.Run("it should pass through error objects from upstream", func(t *testing.T) {
+		defer cache.Reset()
+		defer mockAWSService.Reset()
+
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
+			func(req *http.Request) (*http.Response, error) {
+				resp, err := httpmock.NewJsonResponse(200, map[string]interface{}{
+					"objects": []map[string]interface{}{
+						{
+							"oid":  "nonexistent",
+							"size": 1,
+							"error": map[string]interface{}{
+								"code":    404,
+								"message": "Object does not exist on the server",
+							},
+						},
+					},
+				})
+				return resp, err
+			},
+		)
+
+		w := httptest.NewRecorder()
+		c, r := gin.CreateTestContext(w)
+
+		r.POST("/*path", lfsHandler.PostBatch)
+
+		var jsonData = []byte(`{
+			"operation": "download",
+			"transfers": [ "basic" ],
+			"ref": { "name": "refs/heads/main" },
+			"objects": [{"oid": "nonexistent", "size": 1}],
+			"hash_algo": "sha256"
+		}`)
+
+		var err error
+		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		assert.NoError(t, err)
+
+		r.ServeHTTP(w, c.Request)
+		assert.Equal(t, 200, w.Code)
+
+		var batchResp BatchResponse
+		err = json.Unmarshal(w.Body.Bytes(), &batchResp)
+		assert.NoError(t, err)
+		assert.Len(t, batchResp.Objects, 1)
+		assert.Equal(t, "nonexistent", batchResp.Objects[0].OID)
+		assert.NotNil(t, batchResp.Objects[0].Error)
+		assert.Equal(t, 404, batchResp.Objects[0].Error.Code)
+		assert.Equal(t, "Object does not exist on the server", batchResp.Objects[0].Error.Message)
+	})
+
+	t.Run("it should handle mix of found and not-found objects", func(t *testing.T) {
+		defer cache.Reset()
+		defer mockAWSService.Reset()
+
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
+			func(req *http.Request) (*http.Response, error) {
+				resp, err := httpmock.NewJsonResponse(200, map[string]interface{}{
+					"transfer": "basic",
+					"objects": []map[string]interface{}{
+						{
+							"oid":           "found-oid",
+							"size":          100,
+							"authenticated": true,
+							"actions": map[string]interface{}{
+								"download": map[string]interface{}{
+									"href":       "https://some-download.com",
+									"expires_at": "2016-11-10T15:29:07Z",
+								},
+							},
+						},
+						{
+							"oid":  "missing-oid",
+							"size": 1,
+							"error": map[string]interface{}{
+								"code":    404,
+								"message": "Object does not exist on the server",
+							},
+						},
+					},
+				})
+				return resp, err
+			},
+		)
+
+		httpmock.RegisterResponder("GET", "https://some-download.com", httpmock.NewStringResponder(200, ""))
+
+		w := httptest.NewRecorder()
+		c, r := gin.CreateTestContext(w)
+
+		r.POST("/*path", lfsHandler.PostBatch)
+
+		var jsonData = []byte(`{
+			"operation": "download",
+			"transfers": [ "basic" ],
+			"ref": { "name": "refs/heads/main" },
+			"objects": [
+				{"oid": "found-oid", "size": 100},
+				{"oid": "missing-oid", "size": 1}
+			],
+			"hash_algo": "sha256"
+		}`)
+
+		var err error
+		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		assert.NoError(t, err)
+
+		r.ServeHTTP(w, c.Request)
+		assert.Equal(t, 200, w.Code)
+
+		var batchResp BatchResponse
+		err = json.Unmarshal(w.Body.Bytes(), &batchResp)
+		assert.NoError(t, err)
+		assert.Len(t, batchResp.Objects, 2)
+
+		var foundObj, missingObj *BatchObjectResponse
+		for _, obj := range batchResp.Objects {
+			switch obj.OID {
+			case "found-oid":
+				foundObj = obj
+			case "missing-oid":
+				missingObj = obj
+			}
+		}
+
+		assert.NotNil(t, foundObj)
+		assert.NotNil(t, foundObj.Actions["download"])
+
+		assert.NotNil(t, missingObj)
+		assert.NotNil(t, missingObj.Error)
+		assert.Equal(t, 404, missingObj.Error.Code)
+	})
 }

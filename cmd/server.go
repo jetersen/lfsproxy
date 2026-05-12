@@ -35,12 +35,16 @@ func main() {
 		log.Panicf("error getting configuration: %v", err)
 	}
 
+	log.Printf("starting lfsproxy on :%d", PORT)
+	log.Printf("upstream: %s, bucket: %s, orgs: %v", cfg.UpstreamHost, cfg.S3Bucket, cfg.AllowedOrgs)
+
 	router := router.NewRouter()
 	err = router.InitRoutes(ctx, cfg)
 	if err != nil {
 		panic(err)
 	}
 
+	log.Printf("listening on :%d", PORT)
 	err = router.Run(ctx, fmt.Sprintf(":%v", PORT))
 	if err != nil {
 		panic(err)
