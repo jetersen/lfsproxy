@@ -46,33 +46,10 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 	}, nil
 }
 
-func orgFromPath(path string) string {
-	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
-	if len(parts) == 0 {
-		return ""
-	}
-	return parts[0]
-}
-
 func (l LFSHandler) PostBatch(c *gin.Context) {
 	if !strings.HasSuffix(c.Request.URL.Path, "/objects/batch") {
 		c.AbortWithStatus(404)
 		return
-	}
-
-	if len(l.config.AllowedOrgs) > 0 {
-		org := orgFromPath(c.Request.URL.Path)
-		allowed := false
-		for _, a := range l.config.AllowedOrgs {
-			if strings.EqualFold(a, org) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			c.AbortWithStatus(403)
-			return
-		}
 	}
 
 	var batchRequest BatchRequest

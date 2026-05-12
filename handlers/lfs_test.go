@@ -476,7 +476,7 @@ func TestLFSHandler(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
 
-		r.POST("/*path", restrictedHandler.PostBatch)
+		r.POST("/allowed-org/*path", restrictedHandler.PostBatch)
 
 		var jsonData = []byte(`{
 			"operation": "download",
@@ -491,7 +491,7 @@ func TestLFSHandler(t *testing.T) {
 		assert.NoError(t, err)
 
 		r.ServeHTTP(w, c.Request)
-		assert.Equal(t, 403, w.Code)
+		assert.Equal(t, 404, w.Code)
 	})
 
 	t.Run("it should allow requests for permitted orgs", func(t *testing.T) {
@@ -539,7 +539,7 @@ func TestLFSHandler(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
 
-		r.POST("/*path", restrictedHandler.PostBatch)
+		r.POST("/allowed-org/*path", restrictedHandler.PostBatch)
 
 		var jsonData = []byte(`{
 			"operation": "download",
