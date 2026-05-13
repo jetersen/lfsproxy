@@ -85,13 +85,22 @@ func (a *AWS) OIDExists(ctx context.Context, oid string) (bool, error) {
 
 func (a *AWS) GetOIDPreSignedURL(ctx context.Context, oid string) (string, string, error) {
 	if a.presignEnabled {
-		getResult, err := a.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(a.bucket),
-			Key:    aws.String(oid),
-		}, s3.WithPresignExpires(a.presignExpiration))
-		if err != nil {
-			return "", "", err
+		type presignResult struct {
+			url string
+			err error
 		}
+		getCh := make(chan presignResult, 1)
+		go func() {
+			r, err := a.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(a.bucket),
+				Key:    aws.String(oid),
+			}, s3.WithPresignExpires(a.presignExpiration))
+			if err != nil {
+				getCh <- presignResult{err: err}
+			} else {
+				getCh <- presignResult{url: r.URL}
+			}
+		}()
 
 		headResult, err := a.presigner.PresignHeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(a.bucket),
@@ -101,7 +110,12 @@ func (a *AWS) GetOIDPreSignedURL(ctx context.Context, oid string) (string, strin
 			return "", "", err
 		}
 
-		return getResult.URL, headResult.URL, nil
+		getRes := <-getCh
+		if getRes.err != nil {
+			return "", "", getRes.err
+		}
+
+		return getRes.url, headResult.URL, nil
 	}
 
 	if a.useAccelerate {

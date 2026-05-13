@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/allegro/bigcache/v3"
@@ -30,6 +31,7 @@ type LFSHandler struct {
 	upstreamURL    *url.URL
 	metaClient     *http.Client
 	transferClient *http.Client
+	s3Semaphore    chan struct{}
 }
 
 func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error) {
@@ -49,10 +51,10 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 	}
 
 	transport := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-		TLSHandshakeTimeout:  10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		MaxIdleConnsPerHost:  20,
+		DialContext:            (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout:  30 * time.Second,
+		MaxIdleConnsPerHost:    cfg.S3Concurrency,
 	}
 
 	return &LFSHandler{
@@ -64,6 +66,7 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 		upstreamURL:    upstreamURL,
 		metaClient:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		transferClient: &http.Client{Transport: transport},
+		s3Semaphore:    make(chan struct{}, cfg.S3Concurrency),
 	}, nil
 }
 
@@ -93,14 +96,21 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
+	var cacheWg sync.WaitGroup
 	for _, object := range batchRequest.Objects {
 		data, err := l.cache.Get(object.OID)
 		if err == nil {
 			l.promCollector.CacheHits.Add(1)
 			var cachedBatchObjectResponse BatchObjectResponse
 			if err := json.Unmarshal(data, &cachedBatchObjectResponse); err == nil {
-				if l.config.S3PresignEnabled {
-					go l.checkCachedLink(object.OID, cachedBatchObjectResponse.Actions["download"].HeadHref)
+				if cachedBatchObjectResponse.Error == nil && l.config.S3PresignEnabled {
+					cacheWg.Add(1)
+					go func(oid, headHref string) {
+						defer cacheWg.Done()
+						l.s3Semaphore <- struct{}{}
+						defer func() { <-l.s3Semaphore }()
+						l.checkCachedLink(oid, headHref)
+					}(object.OID, cachedBatchObjectResponse.Actions["download"].HeadHref)
 				}
 				finalBatchResponse.Objects = append(finalBatchResponse.Objects, &cachedBatchObjectResponse)
 				continue
@@ -130,6 +140,14 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 		totalUrls := 0
 
 		for _, obj := range upstreamBatchResponse.Objects {
+			if obj.Error != nil {
+				if err := l.cacheObjResponse(obj.OID, *obj); err != nil {
+					log.Printf("error caching error response %v\n", err.Error())
+				}
+				finalBatchResponse.Objects = append(finalBatchResponse.Objects, obj)
+				continue
+			}
+
 			_, ok := obj.Actions["download"]
 			if !ok {
 				finalBatchResponse.Objects = append(finalBatchResponse.Objects, obj)
@@ -137,7 +155,11 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 			}
 
 			totalUrls++
-			go l.pullS3(ctx, *obj, urls)
+			go func(o BatchObjectResponse) {
+				l.s3Semaphore <- struct{}{}
+				defer func() { <-l.s3Semaphore }()
+				l.pullS3(ctx, o, urls)
+			}(*obj)
 		}
 
 		for range totalUrls {
@@ -146,6 +168,7 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 		}
 	}
 
+	cacheWg.Wait()
 	c.JSON(200, finalBatchResponse)
 }
 

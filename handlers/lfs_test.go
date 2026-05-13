@@ -24,6 +24,10 @@ import (
 
 func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, prom *exporter.LFSProxyCollector) LFSHandler {
 	u, _ := url.Parse(cfg.UpstreamHost)
+	concurrency := cfg.S3Concurrency
+	if concurrency == 0 {
+		concurrency = 64
+	}
 	return LFSHandler{
 		baseCtx:        context.Background(),
 		cache:          c,
@@ -33,6 +37,7 @@ func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, pr
 		upstreamURL:    u,
 		metaClient:     http.DefaultClient,
 		transferClient: http.DefaultClient,
+		s3Semaphore:    make(chan struct{}, concurrency),
 	}
 }
 
@@ -605,6 +610,78 @@ func TestLFSHandler(t *testing.T) {
 		assert.NotNil(t, batchResp.Objects[0].Error)
 		assert.Equal(t, 404, batchResp.Objects[0].Error.Code)
 		assert.Equal(t, "Object does not exist on the server", batchResp.Objects[0].Error.Message)
+	})
+
+	t.Run("it should cache error responses and serve them without hitting upstream", func(t *testing.T) {
+		defer cache.Reset()
+		defer mockAWSService.Reset()
+
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		upstreamCalls := 0
+		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
+			func(req *http.Request) (*http.Response, error) {
+				upstreamCalls++
+				resp, err := httpmock.NewJsonResponse(200, map[string]interface{}{
+					"objects": []map[string]interface{}{
+						{
+							"oid":  "dead-oid",
+							"size": 1,
+							"error": map[string]interface{}{
+								"code":    404,
+								"message": "Object does not exist on the server",
+							},
+						},
+					},
+				})
+				return resp, err
+			},
+		)
+
+		w := httptest.NewRecorder()
+		c, r := gin.CreateTestContext(w)
+		r.POST("/*path", lfsHandler.PostBatch)
+
+		jsonData := []byte(`{
+			"operation": "download",
+			"transfers": [ "basic" ],
+			"ref": { "name": "refs/heads/main" },
+			"objects": [{"oid": "dead-oid", "size": 1}],
+			"hash_algo": "sha256"
+		}`)
+
+		var err error
+		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		assert.NoError(t, err)
+		r.ServeHTTP(w, c.Request)
+
+		assert.Equal(t, 200, w.Code)
+		assert.Equal(t, 1, upstreamCalls)
+
+		var batchResp BatchResponse
+		err = json.Unmarshal(w.Body.Bytes(), &batchResp)
+		assert.NoError(t, err)
+		assert.Len(t, batchResp.Objects, 1)
+		assert.Equal(t, 404, batchResp.Objects[0].Error.Code)
+
+		// Second request should come from cache, not upstream
+		w2 := httptest.NewRecorder()
+		c2, r2 := gin.CreateTestContext(w2)
+		r2.POST("/*path", lfsHandler.PostBatch)
+		c2.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		assert.NoError(t, err)
+		r2.ServeHTTP(w2, c2.Request)
+
+		assert.Equal(t, 200, w2.Code)
+		assert.Equal(t, 1, upstreamCalls, "upstream should not be called again for cached error")
+
+		var batchResp2 BatchResponse
+		err = json.Unmarshal(w2.Body.Bytes(), &batchResp2)
+		assert.NoError(t, err)
+		assert.Len(t, batchResp2.Objects, 1)
+		assert.Equal(t, "dead-oid", batchResp2.Objects[0].OID)
+		assert.Equal(t, 404, batchResp2.Objects[0].Error.Code)
 	})
 
 	t.Run("it should handle mix of found and not-found objects", func(t *testing.T) {

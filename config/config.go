@@ -13,6 +13,7 @@ type Config struct {
 	UpstreamHost             string        `split_words:"true" required:"true"`
 	UpstreamToken            string        `split_words:"true"`
 	S3Bucket                 string        `split_words:"true" required:"true"`
+	S3Concurrency            int           `split_words:"true" default:"64"`
 	DebugMode                bool          `split_words:"true" default:"false"`
 	S3UseAccelerate          bool          `split_words:"true" default:"false"`
 	S3PresignEnabled         bool          `split_words:"true" default:"true"`
