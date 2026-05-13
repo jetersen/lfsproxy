@@ -15,7 +15,22 @@ type LFSProxyCollector struct {
 	S3Miss    metrics.Counter
 }
 
-func NewCollector() *LFSProxyCollector {
+type nopCounter struct{}
+
+func (nopCounter) With(...string) metrics.Counter { return nopCounter{} }
+func (nopCounter) Add(float64)                    {}
+
+func NewCollector(enabled bool) *LFSProxyCollector {
+	if !enabled {
+		nop := nopCounter{}
+		return &LFSProxyCollector{
+			CacheHits: nop,
+			CacheMiss: nop,
+			S3Hits:    nop,
+			S3Miss:    nop,
+		}
+	}
+
 	return &LFSProxyCollector{
 		CacheHits: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
 			Namespace: "lfsproxy",

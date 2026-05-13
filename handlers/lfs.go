@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,6 +22,7 @@ import (
 )
 
 type LFSHandler struct {
+	baseCtx        context.Context
 	cache          cache.Cache
 	promCollector  *exporter.LFSProxyCollector
 	awsService     services.AWSService
@@ -56,8 +56,9 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 	}
 
 	return &LFSHandler{
+		baseCtx:        ctx,
 		cache:          cache,
-		promCollector:  exporter.NewCollector(),
+		promCollector:  exporter.NewCollector(cfg.EnablePrometheusExporter),
 		config:         cfg,
 		awsService:     awsService,
 		upstreamURL:    upstreamURL,
@@ -177,14 +178,6 @@ func (l LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchReque
 	}
 	defer resp.Body.Close()
 
-	if !resp.Uncompressed && strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-		var err error
-		if resp.Body, err = gzip.NewReader(resp.Body); err != nil {
-			log.Printf("unexpected error uncompressing response %v\n", err.Error())
-			return nil, 500, nil, err
-		}
-	}
-
 	if resp.StatusCode != 200 {
 		respBytes, _ := io.ReadAll(resp.Body)
 		return nil, resp.StatusCode, respBytes, nil
@@ -244,7 +237,7 @@ func (l LFSHandler) pullS3(ctx context.Context, obj BatchObjectResponse, urls ch
 }
 
 func (l LFSHandler) pushToS3(obj BatchObjectResponse, body io.ReadCloser) {
-	ctx := context.Background()
+	ctx := l.baseCtx
 
 	err := l.awsService.UploadOID(ctx, obj.OID, body)
 	if err != nil {

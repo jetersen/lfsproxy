@@ -25,6 +25,7 @@ import (
 func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, prom *exporter.LFSProxyCollector) LFSHandler {
 	u, _ := url.Parse(cfg.UpstreamHost)
 	return LFSHandler{
+		baseCtx:        context.Background(),
 		cache:          c,
 		promCollector:  prom,
 		config:         cfg,
@@ -128,7 +129,7 @@ func TestLFSHandler(t *testing.T) {
 	cache := NewMockCache()
 	mockAWSService := NewMockAWSService()
 
-	lfsHandler := newTestLFSHandler(cfg, cache, mockAWSService, exporter.NewCollector())
+	lfsHandler := newTestLFSHandler(cfg, cache, mockAWSService, exporter.NewCollector(false))
 
 	t.Run("it should get from upstream", func(t *testing.T) {
 		defer cache.Reset()
