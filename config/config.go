@@ -7,14 +7,15 @@ import (
 )
 
 type Config struct {
-	DebugMode                bool          `split_words:"true" default:"false"`
-	UpstreamHost             string        `split_words:"true" required:"true"`
 	AllowedOrgs              []string      `split_words:"true"`
 	CacheEviction            time.Duration `split_words:"true" default:"23h"`
+	S3PresignExpiration      time.Duration `split_words:"true" default:"24h"`
+	UpstreamHost             string        `split_words:"true" required:"true"`
+	UpstreamToken            string        `split_words:"true"`
 	S3Bucket                 string        `split_words:"true" required:"true"`
+	DebugMode                bool          `split_words:"true" default:"false"`
 	S3UseAccelerate          bool          `split_words:"true" default:"false"`
 	S3PresignEnabled         bool          `split_words:"true" default:"true"`
-	S3PresignExpiration      time.Duration `split_words:"true" default:"24h"`
 	EnablePrometheusExporter bool          `split_words:"true" default:"false"`
 }
 
