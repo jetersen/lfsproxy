@@ -8,9 +8,11 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/allegro/bigcache/v3"
 	"github.com/gin-gonic/gin"
@@ -21,10 +23,13 @@ import (
 )
 
 type LFSHandler struct {
-	cache         cache.Cache
-	promCollector *exporter.LFSProxyCollector
-	awsService    services.AWSService
-	config        *config.Config
+	cache          cache.Cache
+	promCollector  *exporter.LFSProxyCollector
+	awsService     services.AWSService
+	config         *config.Config
+	upstreamURL    *url.URL
+	metaClient     *http.Client
+	transferClient *http.Client
 }
 
 func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error) {
@@ -38,11 +43,26 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 		return nil, err
 	}
 
+	upstreamURL, err := url.Parse(cfg.UpstreamHost)
+	if err != nil {
+		return nil, err
+	}
+
+	transport := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		TLSHandshakeTimeout:  10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConnsPerHost:  20,
+	}
+
 	return &LFSHandler{
-		cache:         cache,
-		promCollector: exporter.NewCollector(),
-		config:        cfg,
-		awsService:    awsService,
+		cache:          cache,
+		promCollector:  exporter.NewCollector(),
+		config:         cfg,
+		awsService:     awsService,
+		upstreamURL:    upstreamURL,
+		metaClient:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		transferClient: &http.Client{Transport: transport},
 	}, nil
 }
 
@@ -54,7 +74,7 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 
 	var batchRequest BatchRequest
 	if err := c.ShouldBindJSON(&batchRequest); err != nil {
-		c.AbortWithError(500, err) //nolint:errcheck
+		c.AbortWithStatusJSON(400, gin.H{"message": err.Error()})
 		return
 	}
 
@@ -92,9 +112,13 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 	}
 
 	if len(modifiedBatchRequest.Objects) > 0 {
-		upstreamBatchResponse, statusCode, err := l.getFromUpstream(ctx, modifiedBatchRequest, c.Request.URL.Path, c.Request.Header)
+		upstreamBatchResponse, statusCode, rawBody, err := l.getFromUpstream(ctx, modifiedBatchRequest, c.Request.URL.Path, c.Request.Header)
 		if err != nil {
-			c.AbortWithError(statusCode, err) //nolint:errcheck
+			c.AbortWithStatusJSON(statusCode, gin.H{"message": err.Error()})
+			return
+		}
+		if rawBody != nil {
+			c.Data(statusCode, "application/vnd.git-lfs+json", rawBody)
 			return
 		}
 
@@ -124,56 +148,54 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 	c.JSON(200, finalBatchResponse)
 }
 
-func (l LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchRequest, urlPath string, headers http.Header) (*BatchResponse, int, error) {
-	upstreamURL, err := url.Parse(l.config.UpstreamHost)
-	if err != nil {
-		return nil, 500, err
-	}
-
+func (l LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchRequest, urlPath string, headers http.Header) (*BatchResponse, int, []byte, error) {
 	var buf bytes.Buffer
-	err = json.NewEncoder(&buf).Encode(batchRequest)
+	err := json.NewEncoder(&buf).Encode(batchRequest)
 	if err != nil {
-		return nil, 500, err
+		return nil, 500, nil, err
 	}
 
-	fullURL := upstreamURL.Scheme + "://" + upstreamURL.Host + strings.TrimRight(upstreamURL.Path, "/") + urlPath
+	fullURL := l.upstreamURL.Scheme + "://" + l.upstreamURL.Host + strings.TrimRight(l.upstreamURL.Path, "/") + urlPath
 	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, &buf)
 	if err != nil {
 		log.Printf("unexpected error creating request %v\n", err.Error())
-		return nil, 500, err
+		return nil, 500, nil, err
 	}
 
 	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
 	req.Header.Set("Accept", "application/vnd.git-lfs+json")
-	if auth := headers.Get("Authorization"); auth != "" {
+	if l.config.UpstreamToken != "" {
+		req.Header.Set("Authorization", "Bearer "+l.config.UpstreamToken)
+	} else if auth := headers.Get("Authorization"); auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := l.metaClient.Do(req)
 	if err != nil {
 		log.Printf("unexpected error from upstream %v\n", err.Error())
-		return nil, 500, err
+		return nil, 500, nil, err
 	}
+	defer resp.Body.Close()
 
 	if !resp.Uncompressed && strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
 		var err error
 		if resp.Body, err = gzip.NewReader(resp.Body); err != nil {
 			log.Printf("unexpected error uncompressing response %v\n", err.Error())
-			return nil, 500, err
+			return nil, 500, nil, err
 		}
 	}
 
 	if resp.StatusCode != 200 {
 		respBytes, _ := io.ReadAll(resp.Body)
-		return nil, resp.StatusCode, errors.New(string(respBytes))
+		return nil, resp.StatusCode, respBytes, nil
 	}
 
 	var upstreamBatchResponse BatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&upstreamBatchResponse); err != nil {
-		return nil, 500, err
+		return nil, 500, nil, err
 	}
 
-	return &upstreamBatchResponse, resp.StatusCode, nil
+	return &upstreamBatchResponse, resp.StatusCode, nil, nil
 }
 
 func (l LFSHandler) pullS3(ctx context.Context, obj BatchObjectResponse, urls chan<- BatchObjectResponse) {
@@ -210,9 +232,11 @@ func (l LFSHandler) pullS3(ctx context.Context, obj BatchObjectResponse, urls ch
 
 		l.promCollector.S3Hits.Add(1)
 	} else {
-		resp, err := http.Get(batchResp.Actions["download"].Href) //nolint:gosec
+		resp, err := l.transferClient.Get(batchResp.Actions["download"].Href) //nolint:gosec
 		if err == nil && resp.StatusCode == 200 {
 			go l.pushToS3(obj, resp.Body)
+		} else if err == nil {
+			resp.Body.Close()
 		}
 		l.promCollector.S3Miss.Add(1)
 	}
@@ -255,11 +279,12 @@ func (l LFSHandler) pushToS3(obj BatchObjectResponse, body io.ReadCloser) {
 }
 
 func (l LFSHandler) checkCachedLink(oid string, headHref string) {
-	r, err := http.DefaultClient.Head(headHref) //nolint:gosec
+	r, err := l.metaClient.Head(headHref) //nolint:gosec
 	if err != nil {
 		log.Printf("error checking cached link for %v: %v\n", oid, err.Error())
 		return
 	}
+	defer r.Body.Close()
 	if r.StatusCode != 200 {
 		log.Printf("removing %v from cache due to expired presigned link: %v\n", headHref, r.StatusCode)
 		l.cache.Delete(oid) //nolint:errcheck

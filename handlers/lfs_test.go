@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +21,19 @@ import (
 	"github.com/jetersen/lfsproxy/exporter"
 	"github.com/stretchr/testify/assert"
 )
+
+func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, prom *exporter.LFSProxyCollector) LFSHandler {
+	u, _ := url.Parse(cfg.UpstreamHost)
+	return LFSHandler{
+		cache:          c,
+		promCollector:  prom,
+		config:         cfg,
+		awsService:     aws,
+		upstreamURL:    u,
+		metaClient:     http.DefaultClient,
+		transferClient: http.DefaultClient,
+	}
+}
 
 type MockCache struct {
 	mu      sync.Mutex
@@ -114,12 +128,7 @@ func TestLFSHandler(t *testing.T) {
 	cache := NewMockCache()
 	mockAWSService := NewMockAWSService()
 
-	lfsHandler := LFSHandler{
-		cache:         cache,
-		promCollector: exporter.NewCollector(),
-		config:        cfg,
-		awsService:    mockAWSService,
-	}
+	lfsHandler := newTestLFSHandler(cfg, cache, mockAWSService, exporter.NewCollector())
 
 	t.Run("it should get from upstream", func(t *testing.T) {
 		defer cache.Reset()
@@ -171,8 +180,9 @@ func TestLFSHandler(t *testing.T) {
 			HashAlgo: "sha256",
 		}
 
-		batchResponse, statusCode, err := lfsHandler.getFromUpstream(context.TODO(), batchRequest, "/org/repo.git/info/lfs/objects/batch", http.Header{})
+		batchResponse, statusCode, rawBody, err := lfsHandler.getFromUpstream(context.TODO(), batchRequest, "/org/repo.git/info/lfs/objects/batch", http.Header{})
 		assert.NoError(t, err)
+		assert.Nil(t, rawBody)
 		assert.Equal(t, 200, statusCode)
 		assert.Equal(t, "basic", batchResponse.Transfer)
 	})
@@ -345,7 +355,7 @@ func TestLFSHandler(t *testing.T) {
 		assert.Equal(t, 200, w.Code)
 		assert.Equal(t, 1, cache.KeysHitLen())
 
-		expected := fmt.Sprintf(`{"transfer":"basic","objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}},{"oid":"1234","size":123,"authenticated":true,"actions":{"download":{"href":"https://some-download.com","header":{"Key":"value"},"expires_at":"2016-11-10T15:29:07Z"}}}]}`, now.Format(time.RFC3339Nano))
+		expected := fmt.Sprintf(`{"transfer":"basic","objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}},{"oid":"1234","size":123,"actions":{"download":{"href":"https://some-download.com","header":{"Key":"value"},"expires_at":"2016-11-10T15:29:07Z"}},"authenticated":true}]}`, now.Format(time.RFC3339Nano))
 
 		assert.Equal(t, expected, string(b))
 
@@ -454,7 +464,7 @@ func TestLFSHandler(t *testing.T) {
 		assert.Equal(t, 200, w.Code)
 		assert.Equal(t, 1, cache.KeysHitLen())
 
-		expected := fmt.Sprintf(`{"transfer":"basic","objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}},{"oid":"1234","size":123,"authenticated":true,"actions":{"download":{"href":"https://this-is-from-s3.com","head_href":"https://this-is-from-s3.com","header":{"Key":"value"},"expires_at":"2016-11-10T15:29:07Z"}}}]}`, now.Format(time.RFC3339Nano))
+		expected := fmt.Sprintf(`{"transfer":"basic","objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}},{"oid":"1234","size":123,"actions":{"download":{"href":"https://this-is-from-s3.com","head_href":"https://this-is-from-s3.com","header":{"Key":"value"},"expires_at":"2016-11-10T15:29:07Z"}},"authenticated":true}]}`, now.Format(time.RFC3339Nano))
 
 		assert.Equal(t, expected, string(b))
 
@@ -462,16 +472,11 @@ func TestLFSHandler(t *testing.T) {
 	})
 
 	t.Run("it should reject requests for disallowed orgs", func(t *testing.T) {
-		restrictedHandler := LFSHandler{
-			cache:         cache,
-			promCollector: lfsHandler.promCollector,
-			config: &config.Config{
-				UpstreamHost:  "https://fake-git-server.com",
-				CacheEviction: 1 * time.Minute,
-				AllowedOrgs:   []string{"allowed-org"},
-			},
-			awsService: mockAWSService,
-		}
+		restrictedHandler := newTestLFSHandler(&config.Config{
+			UpstreamHost:  "https://fake-git-server.com",
+			CacheEviction: 1 * time.Minute,
+			AllowedOrgs:   []string{"allowed-org"},
+		}, cache, mockAWSService, lfsHandler.promCollector)
 
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
@@ -498,16 +503,11 @@ func TestLFSHandler(t *testing.T) {
 		defer cache.Reset()
 		defer mockAWSService.Reset()
 
-		restrictedHandler := LFSHandler{
-			cache:         cache,
-			promCollector: lfsHandler.promCollector,
-			config: &config.Config{
-				UpstreamHost:  "https://fake-git-server.com",
-				CacheEviction: 1 * time.Minute,
-				AllowedOrgs:   []string{"allowed-org"},
-			},
-			awsService: mockAWSService,
-		}
+		restrictedHandler := newTestLFSHandler(&config.Config{
+			UpstreamHost:  "https://fake-git-server.com",
+			CacheEviction: 1 * time.Minute,
+			AllowedOrgs:   []string{"allowed-org"},
+		}, cache, mockAWSService, lfsHandler.promCollector)
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()

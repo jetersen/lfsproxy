@@ -22,9 +22,9 @@ type BatchResponse struct {
 type BatchObjectResponse struct {
 	OID           string                                `json:"oid"`
 	Size          int64                                 `json:"size"`
-	Authenticated bool                                  `json:"authenticated,omitempty"`
 	Actions       map[string]*BatchObjectActionResponse `json:"actions,omitempty"`
 	Error         *BatchObjectErrorResponse             `json:"error,omitempty"`
+	Authenticated bool                                  `json:"authenticated,omitempty"`
 }
 
 type BatchObjectErrorResponse struct {
