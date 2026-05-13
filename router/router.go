@@ -9,7 +9,6 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
-	"github.com/spf13/viper"
 	"github.com/jetersen/lfsproxy/config"
 	"github.com/jetersen/lfsproxy/exporter"
 	"github.com/jetersen/lfsproxy/handlers"
@@ -19,8 +18,8 @@ type Router struct {
 	engine *gin.Engine
 }
 
-func NewRouter() Router {
-	if viper.GetBool("debug_mode") {
+func NewRouter(debugMode bool) Router {
+	if debugMode {
 		gin.SetMode(gin.DebugMode)
 	} else {
 		gin.SetMode(gin.ReleaseMode)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -121,7 +122,7 @@ func (a *AWS) UploadOID(ctx context.Context, oid string, body io.ReadCloser) err
 		Body:   body,
 	})
 	if err != nil {
-		fmt.Printf("error uploading: %v\n", err.Error())
+		log.Printf("error uploading: %v\n", err.Error())
 		return err
 	}
 

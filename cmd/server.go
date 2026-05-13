@@ -38,7 +38,7 @@ func main() {
 	log.Printf("starting lfsproxy on :%d", PORT)
 	log.Printf("upstream: %s, bucket: %s, orgs: %v", cfg.UpstreamHost, cfg.S3Bucket, cfg.AllowedOrgs)
 
-	router := router.NewRouter()
+	router := router.NewRouter(cfg.DebugMode)
 	err = router.InitRoutes(ctx, cfg)
 	if err != nil {
 		panic(err)

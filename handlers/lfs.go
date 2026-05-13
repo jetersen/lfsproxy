@@ -124,7 +124,7 @@ func (l LFSHandler) PostBatch(c *gin.Context) {
 
 		finalBatchResponse.Transfer = upstreamBatchResponse.Transfer
 
-		urls := make(chan BatchObjectResponse)
+		urls := make(chan BatchObjectResponse, len(upstreamBatchResponse.Objects))
 
 		totalUrls := 0
 
