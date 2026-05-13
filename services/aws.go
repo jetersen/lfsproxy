@@ -10,7 +10,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/smithy-go"
@@ -26,7 +26,7 @@ type s3PresignAPI interface {
 }
 
 type s3UploadAPI interface {
-	Upload(ctx context.Context, input *s3.PutObjectInput, opts ...func(*manager.Uploader)) (*manager.UploadOutput, error)
+	UploadObject(ctx context.Context, input *transfermanager.UploadObjectInput, opts ...func(*transfermanager.Options)) (*transfermanager.UploadObjectOutput, error)
 }
 
 type AWSService interface {
@@ -63,7 +63,7 @@ func NewAWSService(ctx context.Context, bucket string, useAccelerate bool, presi
 		presignExpiration: presignExpiration,
 		client:            client,
 		presigner:         s3.NewPresignClient(client),
-		uploader:          manager.NewUploader(client),
+		uploader:          transfermanager.New(client),
 		region:            cfg.Region,
 	}, nil
 }
@@ -116,7 +116,7 @@ func (a *AWS) GetOIDPreSignedURL(ctx context.Context, oid string) (string, strin
 func (a *AWS) UploadOID(ctx context.Context, oid string, body io.ReadCloser) error {
 	defer body.Close()
 
-	_, err := a.uploader.Upload(ctx, &s3.PutObjectInput{
+	_, err := a.uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
 		Bucket: aws.String(a.bucket),
 		Key:    aws.String(oid),
 		Body:   body,

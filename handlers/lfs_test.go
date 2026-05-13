@@ -220,9 +220,9 @@ func TestLFSHandler(t *testing.T) {
 			},
 		}
 
-		if data, err := json.Marshal(obj); err == nil {
-			cache.Set("123", data)
-		}
+		data, err := json.Marshal(obj)
+		assert.NoError(t, err)
+		assert.NoError(t, cache.Set("123", data))
 
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
@@ -241,8 +241,6 @@ func TestLFSHandler(t *testing.T) {
 			],
 			"hash_algo": "sha256"
 		}`)
-
-		var err error
 
 		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
@@ -315,9 +313,9 @@ func TestLFSHandler(t *testing.T) {
 			},
 		}
 
-		if data, err := json.Marshal(obj); err == nil {
-			cache.Set("123", data)
-		}
+		data, err := json.Marshal(obj)
+		assert.NoError(t, err)
+		assert.NoError(t, cache.Set("123", data))
 
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
@@ -340,8 +338,6 @@ func TestLFSHandler(t *testing.T) {
 			],
 			"hash_algo": "sha256"
 		}`)
-
-		var err error
 
 		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
@@ -424,9 +420,9 @@ func TestLFSHandler(t *testing.T) {
 			},
 		}
 
-		if data, err := json.Marshal(obj); err == nil {
-			cache.Set("123", data)
-		}
+		data, err := json.Marshal(obj)
+		assert.NoError(t, err)
+		assert.NoError(t, cache.Set("123", data))
 
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
@@ -449,8 +445,6 @@ func TestLFSHandler(t *testing.T) {
 			],
 			"hash_algo": "sha256"
 		}`)
-
-		var err error
 
 		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
