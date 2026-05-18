@@ -1,2 +1,4 @@
 lfsproxy.yaml
 test-*.sh
+lfsproxy
+*.log
