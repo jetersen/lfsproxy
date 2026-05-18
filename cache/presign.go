@@ -13,7 +13,7 @@ type PresignCache struct {
 }
 
 func NewPresignCache() (*PresignCache, error) {
-	c, err := otter.MustBuilder[string, string](10_000).
+	c, err := otter.MustBuilder[string, string](100_000).
 		WithVariableTTL().
 		Build()
 	if err != nil {
