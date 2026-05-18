@@ -1,3 +1,5 @@
+version: "2"
+
 linters:
   enable:
     - errcheck
@@ -6,11 +8,14 @@ linters:
     - ineffassign
     - staticcheck
     - unused
-    - goimports
     - misspell
     - noctx
     - bodyclose
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/jetersen/lfsproxy
+formatters:
+  enable:
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/jetersen/lfsproxy
