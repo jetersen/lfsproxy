@@ -9,6 +9,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
+
 	"github.com/jetersen/lfsproxy/config"
 	"github.com/jetersen/lfsproxy/exporter"
 	"github.com/jetersen/lfsproxy/handlers"

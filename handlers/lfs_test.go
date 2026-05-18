@@ -16,11 +16,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jarcoal/httpmock"
+	"github.com/stretchr/testify/assert"
+
 	cachemgr "github.com/jetersen/lfsproxy/cache"
 	"github.com/jetersen/lfsproxy/config"
 	"github.com/jetersen/lfsproxy/exporter"
 	lfsmanifest "github.com/jetersen/lfsproxy/manifest"
-	"github.com/stretchr/testify/assert"
 )
 
 func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, prom *exporter.LFSProxyCollector) LFSHandler {
@@ -131,8 +132,8 @@ func (m *MockAWSService) GetDirectURL(oid string) string {
 	return "https://s3.example.com/" + oid
 }
 
-func (m *MockAWSService) LoadManifest(_ context.Context) ([]string, error) {
-	return nil, nil
+func (m *MockAWSService) LoadManifest(_ context.Context) ([]string, bool, error) {
+	return nil, false, nil
 }
 
 func (m *MockAWSService) SaveManifest(_ context.Context, oids []string) error {

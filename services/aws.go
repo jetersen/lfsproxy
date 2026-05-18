@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+
 	"github.com/jetersen/lfsproxy/manifest"
 )
 
@@ -32,12 +33,12 @@ type AWSService interface {
 }
 
 type AWS struct {
-	bucket        string
-	useAccelerate bool
-	client        s3API
-	uploader      s3UploadAPI
+	bucket         string
+	useAccelerate  bool
+	client         s3API
+	uploader       s3UploadAPI
 	manifestClient manifest.S3Client
-	region        string
+	region         string
 }
 
 func NewAWSService(ctx context.Context, bucket string, useAccelerate bool) (AWSService, error) {

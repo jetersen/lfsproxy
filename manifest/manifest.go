@@ -80,4 +80,3 @@ func Save(ctx context.Context, client S3Client, bucket string, oids []string) er
 	})
 	return err
 }
-
