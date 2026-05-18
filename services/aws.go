@@ -98,7 +98,7 @@ func (a *AWS) PresignObject(ctx context.Context, oid string, ttl time.Duration) 
 }
 
 func (a *AWS) UploadOID(ctx context.Context, oid string, body io.ReadCloser) error {
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	_, err := a.uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
 		Bucket: aws.String(a.bucket),

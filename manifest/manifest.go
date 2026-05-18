@@ -28,7 +28,7 @@ func Parse(r io.Reader) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("manifest: decompress: %w", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 
 	var oids []string
 	scanner := bufio.NewScanner(gz)
@@ -63,7 +63,7 @@ func Load(ctx context.Context, client S3Client, bucket string) ([]string, error)
 		}
 		return nil, err
 	}
-	defer result.Body.Close()
+	defer func() { _ = result.Body.Close() }()
 	return Parse(result.Body)
 }
 

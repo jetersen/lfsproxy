@@ -263,7 +263,7 @@ func TestLFSHandler(t *testing.T) {
 		}`)
 
 		var err error
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequestWithContext(context.Background(), "POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		c.Request.Header.Set("Content-Type", "application/vnd.git-lfs+json")
@@ -343,7 +343,7 @@ func TestLFSHandler(t *testing.T) {
 		}`)
 
 		var err error
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequestWithContext(context.Background(), "POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		c.Request.Header.Set("Content-Type", "application/vnd.git-lfs+json")
@@ -420,7 +420,7 @@ func TestLFSHandler(t *testing.T) {
 		}`)
 
 		var err error
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequestWithContext(context.Background(), "POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		c.Request.Header.Set("Content-Type", "application/vnd.git-lfs+json")
@@ -467,7 +467,7 @@ func TestLFSHandler(t *testing.T) {
 		}`)
 
 		var err error
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/blocked-org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequestWithContext(context.Background(), "POST", "http://localhost:9999/blocked-org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		r.ServeHTTP(w, c.Request)
@@ -525,7 +525,7 @@ func TestLFSHandler(t *testing.T) {
 		}`)
 
 		var err error
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/allowed-org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequestWithContext(context.Background(), "POST", "http://localhost:9999/allowed-org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		r.ServeHTTP(w, c.Request)
@@ -571,7 +571,7 @@ func TestLFSHandler(t *testing.T) {
 		}`)
 
 		var err error
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequestWithContext(context.Background(), "POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		r.ServeHTTP(w, c.Request)
@@ -627,7 +627,7 @@ func TestLFSHandler(t *testing.T) {
 		}`)
 
 		var err error
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequestWithContext(context.Background(), "POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 		r.ServeHTTP(w, c.Request)
 
@@ -644,7 +644,7 @@ func TestLFSHandler(t *testing.T) {
 		w2 := httptest.NewRecorder()
 		c2, r2 := gin.CreateTestContext(w2)
 		r2.POST("/*path", lfsHandler.PostBatch)
-		c2.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		c2.Request, err = http.NewRequestWithContext(context.Background(), "POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 		r2.ServeHTTP(w2, c2.Request)
 
@@ -715,7 +715,7 @@ func TestLFSHandler(t *testing.T) {
 		}`)
 
 		var err error
-		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
+		c.Request, err = http.NewRequestWithContext(context.Background(), "POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
 		r.ServeHTTP(w, c.Request)
@@ -762,7 +762,7 @@ func TestGetManifest(t *testing.T) {
 	c, r := gin.CreateTestContext(w)
 	r.GET("/manifest", lfsHandler.GetManifest)
 
-	req, err := http.NewRequest("GET", "http://localhost:9999/manifest", nil)
+	req, err := http.NewRequestWithContext(context.Background(), "GET", "http://localhost:9999/manifest", nil)
 	assert.NoError(t, err)
 
 	c.Request = req
@@ -780,7 +780,7 @@ func TestGetManifest(t *testing.T) {
 	c2, r2 := gin.CreateTestContext(w2)
 	r2.GET("/manifest", lfsHandler.GetManifest)
 
-	req2, err := http.NewRequest("GET", "http://localhost:9999/manifest", nil)
+	req2, err := http.NewRequestWithContext(context.Background(), "GET", "http://localhost:9999/manifest", nil)
 	assert.NoError(t, err)
 	req2.Header.Set("If-None-Match", w.Header().Get("ETag"))
 

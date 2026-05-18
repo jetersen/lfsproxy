@@ -250,7 +250,7 @@ func (l *LFSHandler) startCacheFill(obj BatchObjectResponse) {
 	resp, err := l.transferClient.Do(req)
 	if err != nil || resp.StatusCode != 200 {
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		return
 	}
@@ -316,7 +316,7 @@ func (l *LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchRequ
 		log.Printf("unexpected error from upstream %v\n", err.Error())
 		return nil, 500, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		respBytes, _ := io.ReadAll(resp.Body)
