@@ -21,7 +21,6 @@ import (
 	"github.com/jetersen/lfsproxy/services"
 )
 
-
 type LFSHandler struct {
 	baseCtx        context.Context
 	cache          cache.Cache
@@ -348,4 +347,3 @@ func (l *LFSHandler) cacheError(key string, obj BatchObjectResponse) error {
 	}
 	return l.cache.Set(key, data)
 }
-
