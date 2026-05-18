@@ -9,8 +9,7 @@ COPY . ./
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o lfsproxy ./cmd/server.go
 
-FROM alpine:3.21
+FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=build /app/lfsproxy /lfsproxy
-USER nobody:nobody
 ENTRYPOINT ["/lfsproxy"]
