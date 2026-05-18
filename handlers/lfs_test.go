@@ -35,6 +35,7 @@ func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, pr
 		baseCtx:        context.Background(),
 		cache:          c,
 		manifest:       manifest,
+		presignCache:   func() *cachemgr.PresignCache { c, _ := cachemgr.NewPresignCache(); return c }(),
 		promCollector:  prom,
 		config:         cfg,
 		awsService:     aws,
@@ -111,11 +112,10 @@ func (m *MockAWSService) OIDExists(_ context.Context, oid string) (bool, error) 
 	return ok, nil
 }
 
-func (m *MockAWSService) GetOIDPreSignedURL(_ context.Context, oid string) (string, string, error) {
+func (m *MockAWSService) PresignObject(_ context.Context, oid string, _ time.Duration) (string, time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	url := m.urls[oid]
-	return url, url, nil
+	return m.urls[oid], time.Now().Add(time.Hour), nil
 }
 
 func (m *MockAWSService) UploadOID(_ context.Context, _ string, _ io.ReadCloser) error {
@@ -242,6 +242,7 @@ func TestLFSHandler(t *testing.T) {
 		mockAWSService.mu.Lock()
 		mockAWSService.urls["123"] = "https://fake-url.com"
 		mockAWSService.mu.Unlock()
+		lfsHandler.manifest.Add("123")
 
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
@@ -289,6 +290,7 @@ func TestLFSHandler(t *testing.T) {
 		mockAWSService.mu.Lock()
 		mockAWSService.urls["123"] = "https://fake-url.com"
 		mockAWSService.mu.Unlock()
+		lfsHandler.manifest.Add("123")
 
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
@@ -356,7 +358,6 @@ func TestLFSHandler(t *testing.T) {
 
 		var resp BatchResponse
 		assert.NoError(t, json.Unmarshal(b, &resp))
-		assert.Equal(t, "basic", resp.Transfer)
 		assert.Len(t, resp.Objects, 2)
 
 		byOID := map[string]*BatchObjectResponse{}
@@ -383,6 +384,7 @@ func TestLFSHandler(t *testing.T) {
 		mockAWSService.urls["123"] = "https://fake-url.com"
 		mockAWSService.urls["1234"] = "https://this-is-from-s3.com"
 		mockAWSService.mu.Unlock()
+		lfsHandler.manifest.Add("1234")
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()

@@ -20,8 +20,7 @@ type ManifestStore interface {
 }
 
 // ManifestCache is an in-memory OID presence set backed by an S3 manifest object.
-// It replaces bigcache for success responses — entries never expire because
-// OIDs in S3 are permanent.
+// OIDs in S3 are permanent so entries never expire.
 type ManifestCache struct {
 	mu             sync.RWMutex
 	oids           map[string]struct{}

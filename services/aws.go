@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -27,6 +28,7 @@ type s3UploadAPI interface {
 type AWSService interface {
 	OIDExists(ctx context.Context, oid string) (bool, error)
 	GetDirectURL(oid string) string
+	PresignObject(ctx context.Context, oid string, ttl time.Duration) (url string, expiresAt time.Time, err error)
 	UploadOID(ctx context.Context, oid string, body io.ReadCloser) error
 	LoadManifest(ctx context.Context) (oids []string, bootstrapped bool, err error)
 	SaveManifest(ctx context.Context, oids []string) error
@@ -37,6 +39,7 @@ type AWS struct {
 	useAccelerate  bool
 	client         s3API
 	uploader       s3UploadAPI
+	presignClient  *s3.PresignClient
 	manifestClient manifest.S3Client
 	region         string
 }
@@ -56,6 +59,7 @@ func NewAWSService(ctx context.Context, bucket string, useAccelerate bool) (AWSS
 		useAccelerate:  useAccelerate,
 		client:         client,
 		uploader:       transfermanager.New(client),
+		presignClient:  s3.NewPresignClient(client),
 		manifestClient: client,
 		region:         cfg.Region,
 	}, nil
@@ -78,6 +82,19 @@ func (a *AWS) OIDExists(ctx context.Context, oid string) (bool, error) {
 
 func (a *AWS) GetDirectURL(oid string) string {
 	return a.bucket + "/" + oid
+}
+
+func (a *AWS) PresignObject(ctx context.Context, oid string, ttl time.Duration) (string, time.Time, error) {
+	req, err := a.presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(a.bucket),
+		Key:    aws.String(oid),
+	}, func(o *s3.PresignOptions) {
+		o.Expires = ttl
+	})
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return req.URL, time.Now().Add(ttl), nil
 }
 
 func (a *AWS) UploadOID(ctx context.Context, oid string, body io.ReadCloser) error {
