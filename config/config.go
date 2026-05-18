@@ -8,15 +8,15 @@ import (
 
 type Config struct {
 	AllowedOrgs              []string      `split_words:"true"`
-	CacheEviction            time.Duration `split_words:"true" default:"23h"`
-	S3PresignExpiration      time.Duration `split_words:"true" default:"24h"`
+	CacheEviction            time.Duration `split_words:"true" default:"1h"`
+	ManifestSaveInterval     time.Duration `split_words:"true" default:"5m"`
+	ShutdownTimeout          time.Duration `split_words:"true" default:"60s"`
 	UpstreamHost             string        `split_words:"true" required:"true"`
 	UpstreamToken            string        `split_words:"true"`
 	S3Bucket                 string        `split_words:"true" required:"true"`
 	S3Concurrency            int           `split_words:"true" default:"64"`
 	DebugMode                bool          `split_words:"true" default:"false"`
 	S3UseAccelerate          bool          `split_words:"true" default:"false"`
-	S3PresignEnabled         bool          `split_words:"true" default:"true"`
 	EnablePrometheusExporter bool          `split_words:"true" default:"false"`
 }
 

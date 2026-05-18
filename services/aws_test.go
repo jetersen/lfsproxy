@@ -3,11 +3,10 @@ package services
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/assert"
 )
@@ -25,102 +24,69 @@ func (m mockS3Client) HeadObject(_ context.Context, input *s3.HeadObjectInput, _
 			}
 		}
 	}
-
 	return nil, &smithy.GenericAPIError{Code: "NotFound", Message: "Object not found"}
 }
 
-type mockPresignClient struct {
-	called *int
+type mockManifestClient struct {
+	objects []string
 }
 
-func (m mockPresignClient) PresignGetObject(_ context.Context, input *s3.GetObjectInput, _ ...func(*s3.PresignOptions)) (*v4.PresignedHTTPRequest, error) {
-	*m.called++
-	return &v4.PresignedHTTPRequest{URL: "https://presigned.example.com/get/" + aws.ToString(input.Key)}, nil
+func (m mockManifestClient) GetObject(_ context.Context, _ *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return nil, &smithy.GenericAPIError{Code: "NoSuchKey"}
 }
 
-func (m mockPresignClient) PresignHeadObject(_ context.Context, input *s3.HeadObjectInput, _ ...func(*s3.PresignOptions)) (*v4.PresignedHTTPRequest, error) {
-	*m.called++
-	return &v4.PresignedHTTPRequest{URL: "https://presigned.example.com/head/" + aws.ToString(input.Key)}, nil
+func (m mockManifestClient) PutObject(_ context.Context, _ *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	return &s3.PutObjectOutput{}, nil
+}
+
+func (m mockManifestClient) ListObjectsV2(_ context.Context, _ *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	contents := make([]s3types.Object, len(m.objects))
+	for i, key := range m.objects {
+		k := key
+		contents[i] = s3types.Object{Key: &k}
+	}
+	return &s3.ListObjectsV2Output{
+		Contents:    contents,
+		IsTruncated: aws.Bool(false),
+	}, nil
 }
 
 func TestOIDExists(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("OIDExists return false because OID doesn't exist", func(t *testing.T) {
-		awsService := AWS{
-			bucket: "test-bucket",
-			client: mockS3Client{
-				bucket:          "test-bucket",
-				objectsInBucket: []string{},
-			},
-		}
-
-		exists, err := awsService.OIDExists(ctx, "test-oid")
+		svc := AWS{bucket: "test-bucket", client: mockS3Client{bucket: "test-bucket"}}
+		exists, err := svc.OIDExists(ctx, "test-oid")
 		assert.NoError(t, err)
 		assert.False(t, exists)
 	})
 
 	t.Run("OIDExists return true because OID exists", func(t *testing.T) {
-		awsService := AWS{
-			bucket: "test-bucket",
-			client: mockS3Client{
-				bucket:          "test-bucket",
-				objectsInBucket: []string{"test-oid"},
-			},
-		}
-
-		exists, err := awsService.OIDExists(ctx, "test-oid")
+		svc := AWS{bucket: "test-bucket", client: mockS3Client{bucket: "test-bucket", objectsInBucket: []string{"test-oid"}}}
+		exists, err := svc.OIDExists(ctx, "test-oid")
 		assert.NoError(t, err)
 		assert.True(t, exists)
 	})
 }
 
-func TestGetOIDPreSignedURL(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("Returns non-presign urls", func(t *testing.T) {
-		awsService := AWS{
-			bucket:         "test-bucket",
-			presignEnabled: false,
-			useAccelerate:  false,
-			region:         "eu-west-1",
-		}
-
-		urlStr, headUrlStr, err := awsService.GetOIDPreSignedURL(ctx, "test-oid")
-		assert.NoError(t, err)
-		assert.Equal(t, "https://test-bucket.s3.eu-west-1.amazonaws.com/test-oid", urlStr)
-		assert.Equal(t, "https://test-bucket.s3.eu-west-1.amazonaws.com/test-oid", headUrlStr)
+func TestGetDirectURL(t *testing.T) {
+	t.Run("standard S3 URL", func(t *testing.T) {
+		svc := AWS{bucket: "my-bucket", region: "eu-west-1"}
+		assert.Equal(t, "https://my-bucket.s3.eu-west-1.amazonaws.com/abc123", svc.GetDirectURL("abc123"))
 	})
 
-	t.Run("Returns non-presign s3 accelerate urls", func(t *testing.T) {
-		awsService := AWS{
-			bucket:         "test-bucket",
-			presignEnabled: false,
-			useAccelerate:  true,
-			region:         "eu-west-1",
-		}
-
-		urlStr, headUrlStr, err := awsService.GetOIDPreSignedURL(ctx, "test-oid")
-		assert.NoError(t, err)
-		assert.Equal(t, "https://test-bucket.s3-accelerate.amazonaws.com/test-oid", urlStr)
-		assert.Equal(t, "https://test-bucket.s3-accelerate.amazonaws.com/test-oid", headUrlStr)
+	t.Run("accelerate S3 URL", func(t *testing.T) {
+		svc := AWS{bucket: "my-bucket", useAccelerate: true}
+		assert.Equal(t, "https://my-bucket.s3-accelerate.amazonaws.com/abc123", svc.GetDirectURL("abc123"))
 	})
+}
 
-	t.Run("Returns presign s3 urls", func(t *testing.T) {
-		counter := new(int)
-		awsService := AWS{
-			bucket:            "test-bucket",
-			presignEnabled:    true,
-			useAccelerate:     false,
-			presignExpiration: 1 * time.Hour,
-			region:            "eu-west-1",
-			presigner:         mockPresignClient{called: counter},
-		}
-
-		getURL, headURL, err := awsService.GetOIDPreSignedURL(ctx, "test-oid")
-		assert.NoError(t, err)
-		assert.Equal(t, 2, *counter)
-		assert.Equal(t, "https://presigned.example.com/get/test-oid", getURL)
-		assert.Equal(t, "https://presigned.example.com/head/test-oid", headURL)
-	})
+func TestBootstrapManifest(t *testing.T) {
+	svc := AWS{
+		bucket:         "test-bucket",
+		manifestClient: mockManifestClient{objects: []string{"abc", "def", ".lfsproxy-manifest"}},
+	}
+	oids, err := svc.bootstrapManifest(context.Background())
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []string{"abc", "def"}, oids)
 }

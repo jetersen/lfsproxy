@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,8 +16,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jarcoal/httpmock"
+	cachemgr "github.com/jetersen/lfsproxy/cache"
 	"github.com/jetersen/lfsproxy/config"
 	"github.com/jetersen/lfsproxy/exporter"
+	lfsmanifest "github.com/jetersen/lfsproxy/manifest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -28,9 +29,11 @@ func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, pr
 	if concurrency == 0 {
 		concurrency = 64
 	}
+	manifest, _ := cachemgr.NewManifestCache(context.Background(), aws, 1*time.Hour)
 	return LFSHandler{
 		baseCtx:        context.Background(),
 		cache:          c,
+		manifest:       manifest,
 		promCollector:  prom,
 		config:         cfg,
 		awsService:     aws,
@@ -92,6 +95,7 @@ func (m *MockCache) KeysHitLen() int {
 type MockAWSService struct {
 	mu           sync.Mutex
 	urls         map[string]string
+	savedOIDs    []string
 	uploadCalled atomic.Bool
 }
 
@@ -118,11 +122,38 @@ func (m *MockAWSService) UploadOID(_ context.Context, _ string, _ io.ReadCloser)
 	return nil
 }
 
+func (m *MockAWSService) GetDirectURL(oid string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if url, ok := m.urls[oid]; ok {
+		return url
+	}
+	return "https://s3.example.com/" + oid
+}
+
+func (m *MockAWSService) LoadManifest(_ context.Context) ([]string, error) {
+	return nil, nil
+}
+
+func (m *MockAWSService) SaveManifest(_ context.Context, oids []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.savedOIDs = append([]string(nil), oids...)
+	return nil
+}
+
 func (m *MockAWSService) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.uploadCalled.Store(false)
+	m.savedOIDs = nil
 	clear(m.urls)
+}
+
+func (m *MockAWSService) SavedOIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.savedOIDs...)
 }
 
 func TestLFSHandler(t *testing.T) {
@@ -193,7 +224,7 @@ func TestLFSHandler(t *testing.T) {
 		assert.Equal(t, "basic", batchResponse.Transfer)
 	})
 
-	t.Run("it should return all cached responses", func(t *testing.T) {
+	t.Run("it should return all responses from S3 without calling upstream", func(t *testing.T) {
 		defer cache.Reset()
 		defer mockAWSService.Reset()
 
@@ -207,27 +238,9 @@ func TestLFSHandler(t *testing.T) {
 			},
 		)
 
-		now := time.Now()
-		obj := BatchObjectResponse{
-			OID:           "123",
-			Size:          123,
-			Authenticated: false,
-			Actions: map[string]*BatchObjectActionResponse{
-				"download": {
-					Href:     "https://fake-url.com",
-					HeadHref: "https://fake-url.com",
-					Header: map[string]string{
-						"Content-Type": "application/octet-stream",
-					},
-					ExpiresIn: 0,
-					ExpiresAt: now,
-				},
-			},
-		}
-
-		data, err := json.Marshal(obj)
-		assert.NoError(t, err)
-		assert.NoError(t, cache.Set("123", data))
+		mockAWSService.mu.Lock()
+		mockAWSService.urls["123"] = "https://fake-url.com"
+		mockAWSService.mu.Unlock()
 
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
@@ -247,6 +260,7 @@ func TestLFSHandler(t *testing.T) {
 			"hash_algo": "sha256"
 		}`)
 
+		var err error
 		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
@@ -258,19 +272,22 @@ func TestLFSHandler(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, 1, cache.KeysHitLen())
+		assert.Equal(t, 0, cache.KeysHitLen())
 
-		expected := fmt.Sprintf(`{"objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}}]}`, now.Format(time.RFC3339Nano))
-
-		assert.Equal(t, expected, string(b))
+		assert.Equal(t, `{"objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","expires_at":"0001-01-01T00:00:00Z"}}}]}`, string(b))
 	})
 
-	t.Run("it should return a mix of cached and upstream responses - with no URLs from S3", func(t *testing.T) {
+	t.Run("it should return a mix of S3 and upstream responses", func(t *testing.T) {
 		defer cache.Reset()
 		defer mockAWSService.Reset()
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
+
+		// "123" is in S3 — served directly, no upstream call needed for it.
+		mockAWSService.mu.Lock()
+		mockAWSService.urls["123"] = "https://fake-url.com"
+		mockAWSService.mu.Unlock()
 
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
@@ -300,28 +317,6 @@ func TestLFSHandler(t *testing.T) {
 
 		httpmock.RegisterResponder("GET", "https://some-download.com", httpmock.NewStringResponder(200, ""))
 
-		now := time.Now()
-		obj := BatchObjectResponse{
-			OID:           "123",
-			Size:          123,
-			Authenticated: false,
-			Actions: map[string]*BatchObjectActionResponse{
-				"download": {
-					Href:     "https://fake-url.com",
-					HeadHref: "https://fake-url.com",
-					Header: map[string]string{
-						"Content-Type": "application/octet-stream",
-					},
-					ExpiresIn: 0,
-					ExpiresAt: now,
-				},
-			},
-		}
-
-		data, err := json.Marshal(obj)
-		assert.NoError(t, err)
-		assert.NoError(t, cache.Set("123", data))
-
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
 
@@ -344,6 +339,7 @@ func TestLFSHandler(t *testing.T) {
 			"hash_algo": "sha256"
 		}`)
 
+		var err error
 		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
@@ -355,18 +351,26 @@ func TestLFSHandler(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, 1, cache.KeysHitLen())
+		assert.Equal(t, 0, cache.KeysHitLen())
 
-		expected := fmt.Sprintf(`{"transfer":"basic","objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}},{"oid":"1234","size":123,"actions":{"download":{"href":"https://some-download.com","header":{"Key":"value"},"expires_at":"2016-11-10T15:29:07Z"}},"authenticated":true}]}`, now.Format(time.RFC3339Nano))
+		var resp BatchResponse
+		assert.NoError(t, json.Unmarshal(b, &resp))
+		assert.Equal(t, "basic", resp.Transfer)
+		assert.Len(t, resp.Objects, 2)
 
-		assert.Equal(t, expected, string(b))
+		byOID := map[string]*BatchObjectResponse{}
+		for _, o := range resp.Objects {
+			byOID[o.OID] = o
+		}
+		assert.Equal(t, "https://fake-url.com", byOID["123"].Actions["download"].Href)
+		assert.Equal(t, "https://some-download.com", byOID["1234"].Actions["download"].Href)
 
 		assert.Eventually(t, func() bool {
 			return mockAWSService.uploadCalled.Load()
 		}, 1*time.Second, 100*time.Millisecond)
 	})
 
-	t.Run("it should return a mix of cached and upstream responses - with URLs from S3", func(t *testing.T) {
+	t.Run("it should return both objects from S3 without calling upstream", func(t *testing.T) {
 		// Drain background goroutines from previous test before resetting shared state
 		time.Sleep(100 * time.Millisecond)
 		cache.Reset()
@@ -375,59 +379,20 @@ func TestLFSHandler(t *testing.T) {
 		defer mockAWSService.Reset()
 
 		mockAWSService.mu.Lock()
+		mockAWSService.urls["123"] = "https://fake-url.com"
 		mockAWSService.urls["1234"] = "https://this-is-from-s3.com"
 		mockAWSService.mu.Unlock()
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
 
+		upstreamCalls := 0
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
-				resp, err := httpmock.NewJsonResponse(200, map[string]interface{}{
-					"transfer": "basic",
-					"objects": []map[string]interface{}{
-						{
-							"oid":           "1234",
-							"size":          123,
-							"authenticated": true,
-							"actions": map[string]interface{}{
-								"download": map[string]interface{}{
-									"href": "https://some-download.com",
-									"header": map[string]interface{}{
-										"Key": "value",
-									},
-									"expires_at": "2016-11-10T15:29:07Z",
-								},
-							},
-						},
-					},
-					"hash_algo": "sha256",
-				})
-				return resp, err
+				upstreamCalls++
+				return httpmock.NewJsonResponse(200, map[string]interface{}{})
 			},
 		)
-
-		now := time.Now()
-		obj := BatchObjectResponse{
-			OID:           "123",
-			Size:          123,
-			Authenticated: false,
-			Actions: map[string]*BatchObjectActionResponse{
-				"download": {
-					Href:     "https://fake-url.com",
-					HeadHref: "https://fake-url.com",
-					Header: map[string]string{
-						"Content-Type": "application/octet-stream",
-					},
-					ExpiresIn: 0,
-					ExpiresAt: now,
-				},
-			},
-		}
-
-		data, err := json.Marshal(obj)
-		assert.NoError(t, err)
-		assert.NoError(t, cache.Set("123", data))
 
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
@@ -451,6 +416,7 @@ func TestLFSHandler(t *testing.T) {
 			"hash_algo": "sha256"
 		}`)
 
+		var err error
 		c.Request, err = http.NewRequest("POST", "http://localhost:9999/org/repo.git/info/lfs/objects/batch", bytes.NewBuffer(jsonData))
 		assert.NoError(t, err)
 
@@ -462,13 +428,19 @@ func TestLFSHandler(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, 1, cache.KeysHitLen())
-
-		expected := fmt.Sprintf(`{"transfer":"basic","objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","head_href":"https://fake-url.com","header":{"Content-Type":"application/octet-stream"},"expires_at":"%v"}}},{"oid":"1234","size":123,"actions":{"download":{"href":"https://this-is-from-s3.com","head_href":"https://this-is-from-s3.com","header":{"Key":"value"},"expires_at":"2016-11-10T15:29:07Z"}},"authenticated":true}]}`, now.Format(time.RFC3339Nano))
-
-		assert.Equal(t, expected, string(b))
-
+		assert.Equal(t, 0, upstreamCalls, "upstream should not be called for objects already in S3")
 		assert.False(t, mockAWSService.uploadCalled.Load())
+
+		var resp BatchResponse
+		assert.NoError(t, json.Unmarshal(b, &resp))
+		assert.Len(t, resp.Objects, 2)
+
+		byOID := map[string]*BatchObjectResponse{}
+		for _, o := range resp.Objects {
+			byOID[o.OID] = o
+		}
+		assert.Equal(t, "https://fake-url.com", byOID["123"].Actions["download"].Href)
+		assert.Equal(t, "https://this-is-from-s3.com", byOID["1234"].Actions["download"].Href)
 	})
 
 	t.Run("it should reject requests for disallowed orgs", func(t *testing.T) {
@@ -768,4 +740,69 @@ func TestLFSHandler(t *testing.T) {
 		assert.NotNil(t, missingObj.Error)
 		assert.Equal(t, 404, missingObj.Error.Code)
 	})
+}
+
+func TestGetManifest(t *testing.T) {
+	cfg := &config.Config{
+		UpstreamHost:  "https://fake-git-server.com",
+		CacheEviction: 1 * time.Minute,
+	}
+
+	cache := NewMockCache()
+	mockAWSService := NewMockAWSService()
+	lfsHandler := newTestLFSHandler(cfg, cache, mockAWSService, exporter.NewCollector(false))
+
+	lfsHandler.manifest.Add("def")
+	lfsHandler.manifest.Add("abc")
+
+	w := httptest.NewRecorder()
+	c, r := gin.CreateTestContext(w)
+	r.GET("/manifest", lfsHandler.GetManifest)
+
+	req, err := http.NewRequest("GET", "http://localhost:9999/manifest", nil)
+	assert.NoError(t, err)
+
+	c.Request = req
+	r.ServeHTTP(w, c.Request)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/gzip", w.Header().Get("Content-Type"))
+	assert.NotEmpty(t, w.Header().Get("ETag"))
+
+	oids, err := lfsmanifest.Parse(bytes.NewReader(w.Body.Bytes()))
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"abc", "def"}, oids)
+
+	w2 := httptest.NewRecorder()
+	c2, r2 := gin.CreateTestContext(w2)
+	r2.GET("/manifest", lfsHandler.GetManifest)
+
+	req2, err := http.NewRequest("GET", "http://localhost:9999/manifest", nil)
+	assert.NoError(t, err)
+	req2.Header.Set("If-None-Match", w.Header().Get("ETag"))
+
+	c2.Request = req2
+	r2.ServeHTTP(w2, c2.Request)
+
+	assert.Equal(t, http.StatusNotModified, w2.Code)
+	assert.Empty(t, w2.Body.Bytes())
+}
+
+func TestShutdownFlushesManifest(t *testing.T) {
+	cfg := &config.Config{
+		UpstreamHost:  "https://fake-git-server.com",
+		CacheEviction: 1 * time.Minute,
+	}
+
+	cache := NewMockCache()
+	mockAWSService := NewMockAWSService()
+	lfsHandler := newTestLFSHandler(cfg, cache, mockAWSService, exporter.NewCollector(false))
+	lfsHandler.manifest.Add("shutdown-oid")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	lfsHandler.Shutdown(ctx)
+
+	assert.ElementsMatch(t, []string{"shutdown-oid"}, mockAWSService.SavedOIDs())
 }

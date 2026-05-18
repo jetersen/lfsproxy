@@ -15,7 +15,8 @@ import (
 )
 
 type Router struct {
-	engine *gin.Engine
+	engine   *gin.Engine
+	shutdown func(context.Context)
 }
 
 func NewRouter(debugMode bool) Router {
@@ -34,16 +35,18 @@ func NewRouter(debugMode bool) Router {
 	}
 }
 
-func (r Router) InitRoutes(ctx context.Context, cfg *config.Config) error {
+func (r *Router) InitRoutes(ctx context.Context, cfg *config.Config) error {
 	healthHandler := handlers.HealthHandler{}
 
 	lfsHandler, err := handlers.NewLFSHandler(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	r.shutdown = lfsHandler.Shutdown
 
 	r.engine.Use(gzip.Gzip(gzip.DefaultCompression))
 	r.engine.GET("/health", healthHandler.Get)
+	r.engine.GET("/manifest", lfsHandler.GetManifest)
 
 	if len(cfg.AllowedOrgs) > 0 {
 		for _, org := range cfg.AllowedOrgs {
@@ -60,7 +63,7 @@ func (r Router) InitRoutes(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
-func (r Router) Run(ctx context.Context, portBinding string) error {
+func (r *Router) Run(ctx context.Context, portBinding string, shutdownTimeout time.Duration) error {
 	srv := &http.Server{
 		Addr:              portBinding,
 		Handler:           r.engine,
@@ -72,10 +75,13 @@ func (r Router) Run(ctx context.Context, portBinding string) error {
 	<-ctx.Done()
 	log.Println("shutting down server")
 
-	timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(timeoutCtx); err != nil {
 		return err
+	}
+	if r.shutdown != nil {
+		r.shutdown(timeoutCtx)
 	}
 
 	return nil

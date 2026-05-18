@@ -45,7 +45,7 @@ func main() {
 	}
 
 	log.Printf("listening on :%d", PORT)
-	err = router.Run(ctx, fmt.Sprintf(":%v", PORT))
+	err = router.Run(ctx, fmt.Sprintf(":%v", PORT), cfg.ShutdownTimeout)
 	if err != nil {
 		panic(err)
 	}
