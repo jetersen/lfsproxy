@@ -40,6 +40,7 @@ type AWS struct {
 	client         s3API
 	uploader       s3UploadAPI
 	presignClient  *s3.PresignClient
+	credentials    aws.CredentialsProvider
 	manifestClient manifest.S3Client
 	region         string
 }
@@ -60,6 +61,7 @@ func NewAWSService(ctx context.Context, bucket string, useAccelerate bool) (AWSS
 		client:         client,
 		uploader:       transfermanager.New(client),
 		presignClient:  s3.NewPresignClient(client),
+		credentials:    cfg.Credentials,
 		manifestClient: client,
 		region:         cfg.Region,
 	}, nil
@@ -85,6 +87,16 @@ func (a *AWS) GetDirectURL(oid string) string {
 }
 
 func (a *AWS) PresignObject(ctx context.Context, oid string, ttl time.Duration) (string, time.Time, error) {
+	if a.credentials != nil {
+		creds, err := a.credentials.Retrieve(ctx)
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		ttl = capTTLToCredentials(time.Now(), ttl, creds)
+		if ttl <= 0 {
+			return "", time.Time{}, errors.New("presign: credentials expired")
+		}
+	}
 	req, err := a.presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(a.bucket),
 		Key:    aws.String(oid),
@@ -95,6 +107,17 @@ func (a *AWS) PresignObject(ctx context.Context, oid string, ttl time.Duration) 
 		return "", time.Time{}, err
 	}
 	return req.URL, time.Now().Add(ttl), nil
+}
+
+// capTTLToCredentials limits ttl to the credentials' lifetime: S3 rejects a presigned
+// URL with ExpiredToken once the session credentials that signed it expire.
+func capTTLToCredentials(now time.Time, ttl time.Duration, creds aws.Credentials) time.Duration {
+	if creds.CanExpire {
+		if remaining := creds.Expires.Sub(now); remaining < ttl {
+			return remaining
+		}
+	}
+	return ttl
 }
 
 func (a *AWS) UploadOID(ctx context.Context, oid string, body io.ReadCloser) error {
