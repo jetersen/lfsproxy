@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -82,4 +83,14 @@ func TestBootstrapManifest(t *testing.T) {
 	oids, err := svc.bootstrapManifest(context.Background())
 	assert.NoError(t, err)
 	assert.ElementsMatch(t, []string{"abc", "def"}, oids)
+}
+
+func TestCapTTLToCredentials(t *testing.T) {
+	now := time.Now()
+	ttl := 12 * time.Hour
+
+	assert.Equal(t, ttl, capTTLToCredentials(now, ttl, aws.Credentials{}))
+	assert.Equal(t, ttl, capTTLToCredentials(now, ttl, aws.Credentials{CanExpire: true, Expires: now.Add(24 * time.Hour)}))
+	assert.Equal(t, 2*time.Hour, capTTLToCredentials(now, ttl, aws.Credentials{CanExpire: true, Expires: now.Add(2 * time.Hour)}))
+	assert.LessOrEqual(t, capTTLToCredentials(now, ttl, aws.Credentials{CanExpire: true, Expires: now.Add(-time.Minute)}), time.Duration(0))
 }
