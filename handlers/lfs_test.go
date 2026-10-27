@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jarcoal/httpmock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	cachemgr "github.com/jetersen/lfsproxy/cache"
 	"github.com/jetersen/lfsproxy/config"
@@ -99,6 +100,8 @@ type MockAWSService struct {
 	urls         map[string]string
 	savedOIDs    []string
 	uploadCalled atomic.Bool
+	presignCalls atomic.Int32
+	directCalls  atomic.Int32
 }
 
 func NewMockAWSService() *MockAWSService {
@@ -113,6 +116,7 @@ func (m *MockAWSService) OIDExists(_ context.Context, oid string) (bool, error) 
 }
 
 func (m *MockAWSService) PresignObject(_ context.Context, oid string, _ time.Duration) (string, time.Time, error) {
+	m.presignCalls.Add(1)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.urls[oid], time.Now().Add(time.Hour), nil
@@ -124,6 +128,7 @@ func (m *MockAWSService) UploadOID(_ context.Context, _ string, _ io.ReadCloser)
 }
 
 func (m *MockAWSService) GetDirectURL(oid string) string {
+	m.directCalls.Add(1)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if url, ok := m.urls[oid]; ok {
@@ -159,8 +164,9 @@ func (m *MockAWSService) SavedOIDs() []string {
 
 func TestLFSHandler(t *testing.T) {
 	cfg := &config.Config{
-		UpstreamHost:  "https://fake-git-server.com",
-		CacheEviction: 1 * time.Minute,
+		S3PresignEnabled: true,
+		UpstreamHost:     "https://fake-git-server.com",
+		CacheEviction:    1 * time.Minute,
 	}
 
 	cache := NewMockCache()
@@ -743,6 +749,58 @@ func TestLFSHandler(t *testing.T) {
 		assert.NotNil(t, missingObj.Error)
 		assert.Equal(t, 404, missingObj.Error.Code)
 	})
+}
+
+func TestCachedDownloadModes(t *testing.T) {
+	for _, signed := range []bool{true, false} {
+		for _, manifestHit := range []bool{true, false} {
+			name := "unsigned"
+			if signed {
+				name = "presigned"
+			}
+			if manifestHit {
+				name += "/manifest"
+			} else {
+				name += "/head-object"
+			}
+			t.Run(name, func(t *testing.T) {
+				aws := NewMockAWSService()
+				const href = "https://bucket.s3.eu-west-1.amazonaws.com/abc123"
+				aws.urls["abc123"] = href
+				cfg := &config.Config{UpstreamHost: "https://unused.invalid", S3PresignEnabled: signed}
+				handler := newTestLFSHandler(cfg, NewMockCache(), aws, exporter.NewCollector(false))
+				if manifestHit {
+					handler.manifest.Add("abc123")
+				}
+				if !signed {
+					// Disabling presigning must bypass even an existing cached signature.
+					handler.presignCache.Set("abc123", "https://unused.invalid/old-signature", time.Now().Add(time.Hour))
+				}
+				for range 2 {
+					w := httptest.NewRecorder()
+					_, router := gin.CreateTestContext(w)
+					router.POST("/*path", handler.PostBatch)
+					req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/org/repo.git/info/lfs/objects/batch",
+						bytes.NewBufferString(`{"operation":"download","transfers":["basic"],"objects":[{"oid":"abc123","size":123}]}`))
+					req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
+					router.ServeHTTP(w, req)
+					require.Equal(t, http.StatusOK, w.Code)
+					var response BatchResponse
+					require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+					require.Len(t, response.Objects, 1)
+					require.Contains(t, response.Objects[0].Actions, "download")
+					assert.Equal(t, href, response.Objects[0].Actions["download"].Href)
+				}
+				if signed {
+					assert.Equal(t, int32(1), aws.presignCalls.Load())
+					assert.Zero(t, aws.directCalls.Load())
+				} else {
+					assert.Zero(t, aws.presignCalls.Load())
+					assert.Equal(t, int32(2), aws.directCalls.Load())
+				}
+			})
+		}
+	}
 }
 
 func TestGetManifest(t *testing.T) {

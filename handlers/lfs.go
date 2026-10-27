@@ -101,7 +101,7 @@ func (l *LFSHandler) PostBatch(c *gin.Context) {
 	resp := BatchResponse{Objects: make([]*BatchObjectResponse, 0, len(batchRequest.Objects))}
 
 	// Phase 1: error cache + manifest — both synchronous in-memory lookups.
-	// Manifest hits are presigned and returned immediately; misses go to upstream.
+	// Manifest hits return S3 download URLs immediately; misses go to upstream.
 	var upstreamObjects []*BatchObjectResponse
 
 	for _, object := range batchRequest.Objects {
@@ -115,7 +115,7 @@ func (l *LFSHandler) PostBatch(c *gin.Context) {
 		}
 
 		if l.manifest.Contains(object.OID) {
-			href, err := l.presignURL(ctx, object.OID)
+			href, err := l.downloadURL(ctx, object.OID)
 			if err != nil {
 				log.Printf("presign error for %v: %v\n", object.OID, err)
 				upstreamObjects = append(upstreamObjects, object)
@@ -156,7 +156,7 @@ func (l *LFSHandler) PostBatch(c *gin.Context) {
 			<-l.s3Semaphore
 			if err == nil && exists {
 				l.manifest.Add(obj.OID)
-				href, presignErr := l.presignURL(ctx, obj.OID)
+				href, presignErr := l.downloadURL(ctx, obj.OID)
 				mu.Lock()
 				defer mu.Unlock()
 				if presignErr != nil {
@@ -225,7 +225,10 @@ func (l *LFSHandler) PostBatch(c *gin.Context) {
 	c.JSON(200, resp)
 }
 
-func (l *LFSHandler) presignURL(ctx context.Context, oid string) (string, error) {
+func (l *LFSHandler) downloadURL(ctx context.Context, oid string) (string, error) {
+	if !l.config.S3PresignEnabled {
+		return l.awsService.GetDirectURL(oid), nil
+	}
 	if url, ok := l.presignCache.Get(oid); ok {
 		return url, nil
 	}

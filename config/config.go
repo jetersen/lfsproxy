@@ -18,6 +18,7 @@ type Config struct {
 	S3Concurrency            int           `split_words:"true" default:"64"`
 	DebugMode                bool          `split_words:"true" default:"false"`
 	S3UseAccelerate          bool          `split_words:"true" default:"false"`
+	S3PresignEnabled         bool          `split_words:"true" default:"true"`
 	EnablePrometheusExporter bool          `split_words:"true" default:"false"`
 }
 
