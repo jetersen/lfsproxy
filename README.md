@@ -6,7 +6,9 @@ Supports multiple repositories — the org and repo are inferred from the reques
 
 Cached objects are served directly from S3 using presigned URLs by default. Set `APP_S3_PRESIGN_ENABLED=false` to return ordinary HTTPS S3 URLs for clients whose network has unsigned read access through a bucket policy.
 
-Requests are cached in-memory using [bigcache](https://github.com/allegro/bigcache) to reduce HTTP calls to S3.
+An in-memory manifest tracks cached objects to avoid repeated S3 HEAD requests. Upstream errors are not cached, so retries and requests for other repositories can recover immediately. This endpoint accepts only download operations; uploads must use the original Git LFS server directly.
+
+Each process admits at most four background fills, holding each slot through download and S3 upload completion. When all slots are busy, clients still receive their upstream download URLs; only cache warming is skipped. Fills have a ten-minute timeout and forward the upstream action's headers. S3 HEAD requests retain their separate 64-request default limit.
 
 ## Configuration
 
@@ -20,7 +22,6 @@ All configuration is loaded from environment variables using [envconfig](https:/
 | `APP_S3_USE_ACCELERATE`          | `false` | Use S3 Transfer Acceleration                                       |
 | `APP_S3_PRESIGN_ENABLED`         | `true`  | Use S3 presigned URLs                                              |
 | `APP_PRESIGN_TTL`               | `1h`    | Maximum presigned URL lifetime, capped at signing credential expiry |
-| `APP_CACHE_EVICTION`             | `1h`    | In-memory error-cache eviction interval                            |
 | `APP_ENABLE_PROMETHEUS_EXPORTER` | `false` | Enable Prometheus metrics endpoint (`/metrics`)                    |
 | `APP_DEBUG_MODE`                 | `false` | Enable gin debug mode                                              |
 
