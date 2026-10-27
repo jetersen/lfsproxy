@@ -23,7 +23,6 @@ import (
 
 type LFSHandler struct {
 	baseCtx        context.Context
-	cache          cache.Cache
 	manifest       *cache.ManifestCache
 	presignCache   *cache.PresignCache
 	promCollector  *exporter.LFSProxyCollector
@@ -33,15 +32,13 @@ type LFSHandler struct {
 	metaClient     *http.Client
 	transferClient *http.Client
 	s3Semaphore    chan struct{}
+	fillSlots      chan struct{}
+	fillMu         sync.Mutex
+	stopping       bool
 	uploadWG       sync.WaitGroup
 }
 
 func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error) {
-	errorCache, err := cache.NewCache(cfg.CacheEviction)
-	if err != nil {
-		return nil, err
-	}
-
 	awsService, err := services.NewAWSService(ctx, cfg.S3Bucket, cfg.S3UseAccelerate)
 	if err != nil {
 		return nil, err
@@ -71,7 +68,6 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 
 	return &LFSHandler{
 		baseCtx:        ctx,
-		cache:          errorCache,
 		manifest:       manifest,
 		presignCache:   presignCache,
 		promCollector:  exporter.NewCollector(cfg.EnablePrometheusExporter),
@@ -81,6 +77,7 @@ func NewLFSHandler(ctx context.Context, cfg *config.Config) (*LFSHandler, error)
 		metaClient:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		transferClient: &http.Client{Transport: transport},
 		s3Semaphore:    make(chan struct{}, cfg.S3Concurrency),
+		fillSlots:      make(chan struct{}, 4),
 	}, nil
 }
 
@@ -97,23 +94,20 @@ func (l *LFSHandler) PostBatch(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	// This endpoint is a download cache, not an upload proxy. In particular,
+	// never forward uploads using the application's upstream credentials.
+	if batchRequest.Operation != "download" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"message": "Only download operations are supported"})
+		return
+	}
 
 	resp := BatchResponse{Objects: make([]*BatchObjectResponse, 0, len(batchRequest.Objects))}
 
-	// Phase 1: error cache + manifest — both synchronous in-memory lookups.
+	// Phase 1: synchronous manifest lookups.
 	// Manifest hits return S3 download URLs immediately; misses go to upstream.
 	var upstreamObjects []*BatchObjectResponse
 
 	for _, object := range batchRequest.Objects {
-		if data, err := l.cache.Get(object.OID); err == nil {
-			var cached BatchObjectResponse
-			if json.Unmarshal(data, &cached) == nil && cached.Error != nil {
-				l.promCollector.CacheHits.Add(1)
-				resp.Objects = append(resp.Objects, &cached)
-				continue
-			}
-		}
-
 		if l.manifest.Contains(object.OID) {
 			href, err := l.downloadURL(ctx, object.OID)
 			if err != nil {
@@ -147,13 +141,19 @@ func (l *LFSHandler) PostBatch(c *gin.Context) {
 		trueUpstream []*BatchObjectResponse
 		wg           sync.WaitGroup
 	)
+heads:
 	for _, object := range upstreamObjects {
+		// Admit work before spawning it, and stop waiting when the request ends.
+		select {
+		case l.s3Semaphore <- struct{}{}:
+		case <-ctx.Done():
+			break heads
+		}
 		wg.Add(1)
 		go func(obj *BatchObjectResponse) {
 			defer wg.Done()
-			l.s3Semaphore <- struct{}{}
+			defer func() { <-l.s3Semaphore }()
 			exists, err := l.awsService.OIDExists(ctx, obj.OID)
-			<-l.s3Semaphore
 			if err == nil && exists {
 				l.manifest.Add(obj.OID)
 				href, presignErr := l.downloadURL(ctx, obj.OID)
@@ -180,6 +180,10 @@ func (l *LFSHandler) PostBatch(c *gin.Context) {
 		}(object)
 	}
 	wg.Wait()
+	if ctx.Err() != nil {
+		c.AbortWithStatus(http.StatusRequestTimeout)
+		return
+	}
 
 	if len(trueUpstream) == 0 {
 		c.JSON(200, resp)
@@ -207,9 +211,6 @@ func (l *LFSHandler) PostBatch(c *gin.Context) {
 
 	for _, obj := range upstreamBatchResponse.Objects {
 		if obj.Error != nil {
-			if err := l.cacheError(obj.OID, *obj); err != nil {
-				log.Printf("error caching error response %v\n", err.Error())
-			}
 			resp.Objects = append(resp.Objects, obj)
 			continue
 		}
@@ -217,7 +218,7 @@ func (l *LFSHandler) PostBatch(c *gin.Context) {
 			resp.Objects = append(resp.Objects, obj)
 			continue
 		}
-		go l.startCacheFill(*obj)
+		l.startCacheFill(*obj)
 		l.promCollector.S3Miss.Add(1)
 		resp.Objects = append(resp.Objects, obj)
 	}
@@ -242,13 +243,38 @@ func (l *LFSHandler) downloadURL(ctx context.Context, oid string) (string, error
 
 // startCacheFill downloads an OID from its upstream URL and uploads it to S3
 // so future requests can be served from S3 directly.
-func (l *LFSHandler) startCacheFill(obj BatchObjectResponse) {
-	l.s3Semaphore <- struct{}{}
-	defer func() { <-l.s3Semaphore }()
+func (l *LFSHandler) startCacheFill(obj BatchObjectResponse) bool {
+	l.fillMu.Lock()
+	defer l.fillMu.Unlock()
+	if l.stopping || l.baseCtx.Err() != nil {
+		return false
+	}
+	select {
+	case l.fillSlots <- struct{}{}:
+	default:
+		// The caller still gets the upstream download action. Cache warming
+		// is optional; do not queue more bodies or goroutines when saturated.
+		return false
+	}
+	l.uploadWG.Add(1)
+	go func() {
+		defer l.uploadWG.Done()
+		defer func() { <-l.fillSlots }()
+		ctx, cancel := context.WithTimeout(l.baseCtx, 10*time.Minute)
+		defer cancel()
+		l.fill(ctx, obj)
+	}()
+	return true
+}
 
-	req, err := http.NewRequestWithContext(l.baseCtx, http.MethodGet, obj.Actions["download"].Href, nil) //nolint:gosec
+func (l *LFSHandler) fill(ctx context.Context, obj BatchObjectResponse) {
+	action := obj.Actions["download"]
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, action.Href, nil) //nolint:gosec
 	if err != nil {
 		return
+	}
+	for key, value := range action.Header {
+		req.Header.Set(key, value)
 	}
 	resp, err := l.transferClient.Do(req)
 	if err != nil || resp.StatusCode != 200 {
@@ -257,8 +283,12 @@ func (l *LFSHandler) startCacheFill(obj BatchObjectResponse) {
 		}
 		return
 	}
-	l.uploadWG.Add(1)
-	go l.pushToS3(obj, resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	if err := l.awsService.UploadOID(ctx, obj.OID, resp.Body); err != nil {
+		log.Printf("error uploading to S3: %v\n", err)
+		return
+	}
+	l.manifest.Add(obj.OID)
 }
 
 func (l *LFSHandler) GetManifest(c *gin.Context) {
@@ -278,6 +308,9 @@ func (l *LFSHandler) GetManifest(c *gin.Context) {
 }
 
 func (l *LFSHandler) Shutdown(ctx context.Context) {
+	l.fillMu.Lock()
+	l.stopping = true
+	l.fillMu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		l.uploadWG.Wait()
@@ -332,21 +365,4 @@ func (l *LFSHandler) getFromUpstream(ctx context.Context, batchRequest BatchRequ
 	}
 
 	return &upstreamBatchResponse, resp.StatusCode, nil, nil
-}
-
-func (l *LFSHandler) pushToS3(obj BatchObjectResponse, body io.ReadCloser) {
-	defer l.uploadWG.Done()
-	if err := l.awsService.UploadOID(context.Background(), obj.OID, body); err != nil {
-		log.Printf("error uploading to S3: %v\n", err.Error())
-		return
-	}
-	l.manifest.Add(obj.OID)
-}
-
-func (l *LFSHandler) cacheError(key string, obj BatchObjectResponse) error {
-	data, err := json.Marshal(obj)
-	if err != nil {
-		return err
-	}
-	return l.cache.Set(key, data)
 }

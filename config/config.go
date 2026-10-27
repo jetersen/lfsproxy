@@ -8,7 +8,6 @@ import (
 
 type Config struct {
 	AllowedOrgs              []string      `split_words:"true"`
-	CacheEviction            time.Duration `split_words:"true" default:"1h"`
 	PresignTTL               time.Duration `split_words:"true" default:"1h"`
 	ManifestSaveInterval     time.Duration `split_words:"true" default:"5m"`
 	ShutdownTimeout          time.Duration `split_words:"true" default:"60s"`

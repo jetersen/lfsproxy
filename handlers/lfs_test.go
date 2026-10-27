@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +24,7 @@ import (
 	lfsmanifest "github.com/jetersen/lfsproxy/manifest"
 )
 
-func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, prom *exporter.LFSProxyCollector) LFSHandler {
+func newTestLFSHandler(cfg *config.Config, aws *MockAWSService, prom *exporter.LFSProxyCollector) LFSHandler {
 	u, _ := url.Parse(cfg.UpstreamHost)
 	concurrency := cfg.S3Concurrency
 	if concurrency == 0 {
@@ -34,7 +33,6 @@ func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, pr
 	manifest, _ := cachemgr.NewManifestCache(context.Background(), aws, 1*time.Hour)
 	return LFSHandler{
 		baseCtx:        context.Background(),
-		cache:          c,
 		manifest:       manifest,
 		presignCache:   func() *cachemgr.PresignCache { c, _ := cachemgr.NewPresignCache(); return c }(),
 		promCollector:  prom,
@@ -44,55 +42,8 @@ func newTestLFSHandler(cfg *config.Config, c *MockCache, aws *MockAWSService, pr
 		metaClient:     http.DefaultClient,
 		transferClient: http.DefaultClient,
 		s3Semaphore:    make(chan struct{}, concurrency),
+		fillSlots:      make(chan struct{}, 4),
 	}
-}
-
-type MockCache struct {
-	mu      sync.Mutex
-	cache   map[string][]byte
-	keysHit []string
-}
-
-func NewMockCache() *MockCache {
-	return &MockCache{cache: make(map[string][]byte)}
-}
-
-func (m *MockCache) Get(key string) ([]byte, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	data, ok := m.cache[key]
-	if !ok {
-		return nil, errors.New("Entry not found")
-	}
-	m.keysHit = append(m.keysHit, key)
-	return data, nil
-}
-
-func (m *MockCache) Set(key string, entry []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.cache[key] = entry
-	return nil
-}
-
-func (m *MockCache) Delete(key string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.cache, key)
-	return nil
-}
-
-func (m *MockCache) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	clear(m.cache)
-	m.keysHit = nil
-}
-
-func (m *MockCache) KeysHitLen() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.keysHit)
 }
 
 type MockAWSService struct {
@@ -166,20 +117,18 @@ func TestLFSHandler(t *testing.T) {
 	cfg := &config.Config{
 		S3PresignEnabled: true,
 		UpstreamHost:     "https://fake-git-server.com",
-		CacheEviction:    1 * time.Minute,
 	}
 
-	cache := NewMockCache()
 	mockAWSService := NewMockAWSService()
 
-	lfsHandler := newTestLFSHandler(cfg, cache, mockAWSService, exporter.NewCollector(false))
+	lfsHandler := newTestLFSHandler(cfg, mockAWSService, exporter.NewCollector(false))
 
 	t.Run("it should get from upstream", func(t *testing.T) {
-		defer cache.Reset()
 		defer mockAWSService.Reset()
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
+		defer lfsHandler.uploadWG.Wait()
 
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
@@ -232,11 +181,11 @@ func TestLFSHandler(t *testing.T) {
 	})
 
 	t.Run("it should return all responses from S3 without calling upstream", func(t *testing.T) {
-		defer cache.Reset()
 		defer mockAWSService.Reset()
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
+		defer lfsHandler.uploadWG.Wait()
 
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
@@ -280,17 +229,16 @@ func TestLFSHandler(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, 0, cache.KeysHitLen())
 
 		assert.Equal(t, `{"objects":[{"oid":"123","size":123,"actions":{"download":{"href":"https://fake-url.com","expires_at":"0001-01-01T00:00:00Z"}}}]}`, string(b))
 	})
 
 	t.Run("it should return a mix of S3 and upstream responses", func(t *testing.T) {
-		defer cache.Reset()
 		defer mockAWSService.Reset()
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
+		defer lfsHandler.uploadWG.Wait()
 
 		// "123" is in S3 — served directly, no upstream call needed for it.
 		mockAWSService.mu.Lock()
@@ -360,7 +308,6 @@ func TestLFSHandler(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, 200, w.Code)
-		assert.Equal(t, 0, cache.KeysHitLen())
 
 		var resp BatchResponse
 		assert.NoError(t, json.Unmarshal(b, &resp))
@@ -379,11 +326,7 @@ func TestLFSHandler(t *testing.T) {
 	})
 
 	t.Run("it should return both objects from S3 without calling upstream", func(t *testing.T) {
-		// Drain background goroutines from previous test before resetting shared state
-		time.Sleep(100 * time.Millisecond)
-		cache.Reset()
 		mockAWSService.Reset()
-		defer cache.Reset()
 		defer mockAWSService.Reset()
 
 		mockAWSService.mu.Lock()
@@ -394,6 +337,7 @@ func TestLFSHandler(t *testing.T) {
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
+		defer lfsHandler.uploadWG.Wait()
 
 		upstreamCalls := 0
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
@@ -454,10 +398,9 @@ func TestLFSHandler(t *testing.T) {
 
 	t.Run("it should reject requests for disallowed orgs", func(t *testing.T) {
 		restrictedHandler := newTestLFSHandler(&config.Config{
-			UpstreamHost:  "https://fake-git-server.com",
-			CacheEviction: 1 * time.Minute,
-			AllowedOrgs:   []string{"allowed-org"},
-		}, cache, mockAWSService, lfsHandler.promCollector)
+			UpstreamHost: "https://fake-git-server.com",
+			AllowedOrgs:  []string{"allowed-org"},
+		}, mockAWSService, lfsHandler.promCollector)
 
 		w := httptest.NewRecorder()
 		c, r := gin.CreateTestContext(w)
@@ -481,17 +424,16 @@ func TestLFSHandler(t *testing.T) {
 	})
 
 	t.Run("it should allow requests for permitted orgs", func(t *testing.T) {
-		defer cache.Reset()
 		defer mockAWSService.Reset()
 
 		restrictedHandler := newTestLFSHandler(&config.Config{
-			UpstreamHost:  "https://fake-git-server.com",
-			CacheEviction: 1 * time.Minute,
-			AllowedOrgs:   []string{"allowed-org"},
-		}, cache, mockAWSService, lfsHandler.promCollector)
+			UpstreamHost: "https://fake-git-server.com",
+			AllowedOrgs:  []string{"allowed-org"},
+		}, mockAWSService, lfsHandler.promCollector)
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
+		defer restrictedHandler.uploadWG.Wait()
 
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/allowed-org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
@@ -539,11 +481,11 @@ func TestLFSHandler(t *testing.T) {
 	})
 
 	t.Run("it should pass through error objects from upstream", func(t *testing.T) {
-		defer cache.Reset()
 		defer mockAWSService.Reset()
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
+		defer lfsHandler.uploadWG.Wait()
 
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
@@ -593,12 +535,12 @@ func TestLFSHandler(t *testing.T) {
 		assert.Equal(t, "Object does not exist on the server", batchResp.Objects[0].Error.Message)
 	})
 
-	t.Run("it should cache error responses and serve them without hitting upstream", func(t *testing.T) {
-		defer cache.Reset()
+	t.Run("it should retry error responses instead of caching them", func(t *testing.T) {
 		defer mockAWSService.Reset()
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
+		defer lfsHandler.uploadWG.Wait()
 
 		upstreamCalls := 0
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
@@ -646,7 +588,7 @@ func TestLFSHandler(t *testing.T) {
 		assert.Len(t, batchResp.Objects, 1)
 		assert.Equal(t, 404, batchResp.Objects[0].Error.Code)
 
-		// Second request should come from cache, not upstream
+		// Retry goes upstream so a prior error cannot suppress recovery.
 		w2 := httptest.NewRecorder()
 		c2, r2 := gin.CreateTestContext(w2)
 		r2.POST("/*path", lfsHandler.PostBatch)
@@ -655,7 +597,7 @@ func TestLFSHandler(t *testing.T) {
 		r2.ServeHTTP(w2, c2.Request)
 
 		assert.Equal(t, 200, w2.Code)
-		assert.Equal(t, 1, upstreamCalls, "upstream should not be called again for cached error")
+		assert.Equal(t, 2, upstreamCalls, "errors must remain retryable")
 
 		var batchResp2 BatchResponse
 		err = json.Unmarshal(w2.Body.Bytes(), &batchResp2)
@@ -666,11 +608,11 @@ func TestLFSHandler(t *testing.T) {
 	})
 
 	t.Run("it should handle mix of found and not-found objects", func(t *testing.T) {
-		defer cache.Reset()
 		defer mockAWSService.Reset()
 
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
+		defer lfsHandler.uploadWG.Wait()
 
 		httpmock.RegisterResponder("POST", "https://fake-git-server.com/org/repo.git/info/lfs/objects/batch",
 			func(req *http.Request) (*http.Response, error) {
@@ -768,7 +710,7 @@ func TestCachedDownloadModes(t *testing.T) {
 				const href = "https://bucket.s3.eu-west-1.amazonaws.com/abc123"
 				aws.urls["abc123"] = href
 				cfg := &config.Config{UpstreamHost: "https://unused.invalid", S3PresignEnabled: signed}
-				handler := newTestLFSHandler(cfg, NewMockCache(), aws, exporter.NewCollector(false))
+				handler := newTestLFSHandler(cfg, aws, exporter.NewCollector(false))
 				if manifestHit {
 					handler.manifest.Add("abc123")
 				}
@@ -805,13 +747,11 @@ func TestCachedDownloadModes(t *testing.T) {
 
 func TestGetManifest(t *testing.T) {
 	cfg := &config.Config{
-		UpstreamHost:  "https://fake-git-server.com",
-		CacheEviction: 1 * time.Minute,
+		UpstreamHost: "https://fake-git-server.com",
 	}
 
-	cache := NewMockCache()
 	mockAWSService := NewMockAWSService()
-	lfsHandler := newTestLFSHandler(cfg, cache, mockAWSService, exporter.NewCollector(false))
+	lfsHandler := newTestLFSHandler(cfg, mockAWSService, exporter.NewCollector(false))
 
 	lfsHandler.manifest.Add("def")
 	lfsHandler.manifest.Add("abc")
@@ -851,13 +791,11 @@ func TestGetManifest(t *testing.T) {
 
 func TestShutdownFlushesManifest(t *testing.T) {
 	cfg := &config.Config{
-		UpstreamHost:  "https://fake-git-server.com",
-		CacheEviction: 1 * time.Minute,
+		UpstreamHost: "https://fake-git-server.com",
 	}
 
-	cache := NewMockCache()
 	mockAWSService := NewMockAWSService()
-	lfsHandler := newTestLFSHandler(cfg, cache, mockAWSService, exporter.NewCollector(false))
+	lfsHandler := newTestLFSHandler(cfg, mockAWSService, exporter.NewCollector(false))
 	lfsHandler.manifest.Add("shutdown-oid")
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
