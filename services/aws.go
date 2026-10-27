@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -83,7 +84,11 @@ func (a *AWS) OIDExists(ctx context.Context, oid string) (bool, error) {
 }
 
 func (a *AWS) GetDirectURL(oid string) string {
-	return a.bucket + "/" + oid
+	host := fmt.Sprintf("%s.s3.%s.amazonaws.com", a.bucket, a.region)
+	if a.useAccelerate {
+		host = a.bucket + ".s3-accelerate.amazonaws.com"
+	}
+	return (&url.URL{Scheme: "https", Host: host, Path: "/" + oid}).String()
 }
 
 func (a *AWS) PresignObject(ctx context.Context, oid string, ttl time.Duration) (string, time.Time, error) {

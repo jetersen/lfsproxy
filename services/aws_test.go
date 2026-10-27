@@ -71,8 +71,11 @@ func TestOIDExists(t *testing.T) {
 }
 
 func TestGetDirectURL(t *testing.T) {
-	svc := AWS{bucket: "my-bucket"}
-	assert.Equal(t, "my-bucket/abc123", svc.GetDirectURL("abc123"))
+	svc := AWS{bucket: "my-bucket", region: "eu-west-1"}
+	assert.Equal(t, "https://my-bucket.s3.eu-west-1.amazonaws.com/abc123", svc.GetDirectURL("abc123"))
+	assert.Equal(t, "https://my-bucket.s3.eu-west-1.amazonaws.com/a%20b%3F%23", svc.GetDirectURL("a b?#"))
+	svc.useAccelerate = true
+	assert.Equal(t, "https://my-bucket.s3-accelerate.amazonaws.com/abc123", svc.GetDirectURL("abc123"))
 }
 
 func TestBootstrapManifest(t *testing.T) {

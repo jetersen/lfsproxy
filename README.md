@@ -4,7 +4,7 @@ A pull-through S3 cache for [Git LFS](https://git-lfs.com/) that caches upstream
 
 Supports multiple repositories — the org and repo are inferred from the request path. Objects are stored by OID (content hash), so identical files across repos are deduplicated automatically.
 
-Cached objects are served directly from S3 using presigned URLs for maximum performance.
+Cached objects are served directly from S3 using presigned URLs by default. Set `APP_S3_PRESIGN_ENABLED=false` to return ordinary HTTPS S3 URLs for clients whose network has unsigned read access through a bucket policy.
 
 Requests are cached in-memory using [bigcache](https://github.com/allegro/bigcache) to reduce HTTP calls to S3.
 
@@ -19,10 +19,12 @@ All configuration is loaded from environment variables using [envconfig](https:/
 | `APP_S3_BUCKET`                  |         | S3 bucket name                                                     |
 | `APP_S3_USE_ACCELERATE`          | `false` | Use S3 Transfer Acceleration                                       |
 | `APP_S3_PRESIGN_ENABLED`         | `true`  | Use S3 presigned URLs                                              |
-| `APP_S3_PRESIGN_EXPIRATION`      | `24h`   | Presigned URL expiration                                            |
-| `APP_CACHE_EVICTION`             | `23h`   | In-memory cache eviction interval                                  |
+| `APP_PRESIGN_TTL`               | `1h`    | Maximum presigned URL lifetime, capped at signing credential expiry |
+| `APP_CACHE_EVICTION`             | `1h`    | In-memory error-cache eviction interval                            |
 | `APP_ENABLE_PROMETHEUS_EXPORTER` | `false` | Enable Prometheus metrics endpoint (`/metrics`)                    |
 | `APP_DEBUG_MODE`                 | `false` | Enable gin debug mode                                              |
+
+For an internal cache, grant only `s3:GetObject` on cached objects with a bucket policy conditioned on a fixed `aws:SourceVpce`. Keep S3 Block Public Access enabled and retain IAM authentication for uploads. Clients must use the approved S3 endpoint; unsigned URLs will fail outside that network. Access through this endpoint covers the shared cache, not individual Git repository permissions. Leave S3 Transfer Acceleration disabled for this setup because accelerated requests do not traverse the gateway endpoint.
 
 ### Example
 
